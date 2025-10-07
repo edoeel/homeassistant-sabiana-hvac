@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sabiana HVAC Setup",
+        "description": "Enter your Sabiana HVAC credentials",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid authentication credentials",
+      "cannot_connect": "Unable to connect to Sabiana API",
+      "timeout_error": "Connection timeout",
+      "api_error": "API error occurred",
+      "unknown_error": "Unknown error occurred"
+    }
+  }
+}
