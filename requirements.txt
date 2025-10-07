@@ -2,3 +2,6 @@ colorlog==6.9.0
 homeassistant==2025.2.4
 pip>=21.3.1
 ruff==0.13.3
+httpx>=0.24.0
+voluptuous>=0.13.0
+httpx-retries==0.2.0
