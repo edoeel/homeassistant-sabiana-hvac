@@ -56,6 +56,53 @@ Home Assistant instance running and already configured with the included
 [`configuration.yaml`](./config/configuration.yaml)
 file.
 
+### Running Tests
+
+The project includes a comprehensive test suite to ensure code quality and functionality.
+
+#### Prerequisites
+
+Make sure you have the required dependencies installed:
+
+```bash
+pip install -r requirements.txt
+```
+
+#### Running Tests Locally
+
+You can run tests using the provided script:
+
+```bash
+./scripts/test
+```
+
+Or run pytest directly:
+
+```bash
+python -m pytest tests/ -v --tb=short
+```
+
+#### Test Structure
+
+- `tests/` - Contains all test files
+- `tests/conftest.py` - Test configuration and shared fixtures
+- `tests/test_init.py` - Integration initialization tests
+- `pytest.ini` - Pytest configuration
+
+#### Writing Tests
+
+When adding new features or fixing bugs, please add corresponding tests:
+
+1. Create test files following the pattern `test_*.py`
+2. Use the provided fixtures in `conftest.py` for common test setup
+3. Follow Home Assistant testing guidelines
+4. Ensure tests are fast and don't require external dependencies
+
+#### Continuous Integration
+
+Tests are automatically run on every push and pull request using GitHub Actions.
+The CI runs tests on Python 3.11 and 3.12, and includes linting checks.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under its MIT License.
