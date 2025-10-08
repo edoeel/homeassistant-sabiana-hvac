@@ -4,4 +4,4 @@ pip>=21.3.1
 ruff==0.14.0
 httpx>=0.24.0
 voluptuous>=0.13.0
-httpx-retries==0.2.0
+httpx-retries==0.4.3
