@@ -1,61 +1,74 @@
-# Contribution guidelines
+# Contributing to Home Assistant Sabiana HVAC
 
-Contributing to this project should be as easy and transparent as possible, whether it's:
+Thank you for your interest in contributing to the Home Assistant Sabiana HVAC integration! This document provides guidelines and instructions for contributing to this project.
 
-- Reporting a bug
-- Discussing the current state of the code
-- Submitting a fix
-- Proposing new features
+## Table of Contents
 
-## Github is used for everything
+- [Getting Started](#getting-started)
+- [Development Environment Setup](#development-environment-setup)
+- [Code of Conduct](#code-of-conduct)
+- [License](#license)
 
-Github is used to host code, to track issues and feature requests, as well as accept pull requests.
 
-Pull requests are the best way to propose changes to the codebase.
+## Getting Started
 
-1. Fork the repo and create your branch from `main`.
-2. If you've changed something, update the documentation.
-3. Make sure your code lints (using `scripts/lint`).
-4. Test you contribution.
-5. Issue that pull request!
+### Prerequisites
 
-## Any contributions you make will be under the MIT Software License
+- [Docker](https://www.docker.com/) installed on your system
+- [Git](https://git-scm.com/) for version control
+- [Visual Studio Code](https://code.visualstudio.com/) (recommended)
+- [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) for VS Code
 
-In short, when you submit code changes, your submissions are understood to be under the same [MIT License](http://choosealicense.com/licenses/mit/) that covers the project. Feel free to contact the maintainers if that's a concern.
+### Fork and Clone the Repository
 
-## Report bugs using Github's [issues](../../issues)
+1. Fork the repository
+2. Clone your fork
+3. Add the upstream remote
+4. Create a new branch for your changes
 
-GitHub issues are used to track public bugs.
-Report a bug by [opening a new issue](../../issues/new/choose); it's that easy!
+## Development Environment Setup
 
-## Write bug reports with detail, background, and sample code
+This custom component is based on the [integration_blueprint template](https://github.com/ludeeus/integration_blueprint).
 
-**Great Bug Reports** tend to have:
+### VS Code with Dev Containers
 
-- A quick summary and/or background
-- Steps to reproduce
-  - Be specific!
-  - Give sample code if you can.
-- What you expected would happen
-- What actually happens
-- Notes (possibly including why you think this might be happening, or stuff you tried that didn't work)
+1. **Open the project in VS Code**
+   ```bash
+   code .
+   ```
 
-People *love* thorough bug reports. I'm not even kidding.
+2. **Reopen in Container**
+   - When prompted, click "Reopen in Container"
+   - Or use Command Palette (`Ctrl+Shift+P`) and select "Dev Containers: Reopen in Container"
+   - Wait for the container to build and start
 
-## Use a Consistent Coding Style
+3. **Start Home Assistant**
+   ```bash
+   scripts/develop
+   ```
+   - This command will start the Home Assistant development environment
+   - Wait for Home Assistant to fully initialize
 
-Use [black](https://github.com/ambv/black) to make sure the code follows the style.
+### Verify the Setup
 
-## Test your code modification
+1. **Check Home Assistant is running**
+   - Navigate to `http://localhost:8123`
+   - Complete the initial setup if prompted
 
-This custom component is based on [integration_blueprint template](https://github.com/ludeeus/integration_blueprint).
+2. **Install the custom component**
+   - The development environment should automatically include the component
+   - If not, copy `custom_components/sabiana_hvac/` to your Home Assistant's `custom_components/` folder
 
-It comes with development environment in a container, easy to launch
-if you use Visual Studio Code. With this container you will have a stand alone
-Home Assistant instance running and already configured with the included
-[`configuration.yaml`](./config/configuration.yaml)
-file.
+3. **Add the integration**
+   - Go to Settings → Devices & Services → Add Integration
+   - Search for "Sabiana HVAC" and follow the setup wizard
+
+## Code of Conduct
+
+This project follows the [Home Assistant Code of Conduct](https://www.home-assistant.io/code_of_conduct/). By participating, you are expected to uphold this code.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under its MIT License.
+### MIT License
+
+By contributing to this project, you agree that your contributions will be licensed under the [MIT License](https://opensource.org/licenses/MIT).
