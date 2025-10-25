@@ -185,7 +185,7 @@ def extract_token(data: dict[str, Any]) -> str:
         Authentication token string.
 
     """
-    return data["body"]["user"]["token"]
+    return data["body"]["user"]["shortJwt"]
 
 
 def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
@@ -256,8 +256,8 @@ async def async_authenticate(
         SabianaApiClientError: If API request fails.
 
     """
-    url = f"{BASE_URL}/users/login"
-    payload = {"email": email, "password": password}
+    url = f"{BASE_URL}/users/newLogin"
+    payload = {"email": email, "password": password, "device": "ios"}
     headers = create_headers()
 
     _LOGGER.debug("Authenticating with Sabiana API")
