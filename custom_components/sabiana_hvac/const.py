@@ -29,7 +29,8 @@ ERROR_TIMEOUT = "timeout_error"
 ERROR_API_ERROR = "api_error"
 ERROR_UNKNOWN = "unknown_error"
 
-CONF_TOKEN = "token"  # noqa: S105
+CONF_SHORT_JWT = "shortJwt"
+CONF_LONG_JWT = "longJwt"
 
 HVAC_MODE_MAP = {
     HVACMode.COOL: "0",
