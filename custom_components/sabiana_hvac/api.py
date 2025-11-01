@@ -73,6 +73,23 @@ def create_headers(short_jwt: str | None = None) -> dict[str, str]:
     return headers
 
 
+def create_headers_renew(long_jwt: str) -> dict[str, str]:
+    """
+    Create HTTP headers for JWT renewal requests.
+
+    Args:
+        long_jwt: Long-term JWT to include in headers as "renewauth".
+
+    Returns:
+        Dictionary containing HTTP headers for renewal requests.
+
+    """
+    headers = create_headers()
+    headers.pop("auth", None)
+    headers["renewauth"] = long_jwt
+    return headers
+
+
 def is_http_error(status: int) -> bool:
     """
     Check if HTTP status code indicates an error.
@@ -298,6 +315,35 @@ async def async_get_devices(
     devices = extract_devices(data)
     _LOGGER.debug("Retrieved %d devices from Sabiana API", len(devices))
     return devices
+
+
+async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> str:
+    """
+    Renew short-term JWT using long-term JWT.
+
+    Args:
+        session: HTTP client session.
+        long_jwt: Long-term JWT used for renewal.
+
+    Returns:
+        New short-term JWT.
+
+    Raises:
+        SabianaApiAuthError: If authentication fails.
+        SabianaApiClientError: If API request fails.
+
+    """
+    url = f"{BASE_URL}/renewJwt"
+    headers = create_headers_renew(long_jwt)
+    payload = {}
+
+    _LOGGER.debug("Renewing JWT with Sabiana API")
+    response = await session.post(url, headers=headers, json=payload)
+    data = validate_response(response)
+    short_jwt, _ = extract_JWTs(data)
+
+    _LOGGER.debug("Successfully renewed JWT with Sabiana API")
+    return short_jwt
 
 
 async def async_send_command(
