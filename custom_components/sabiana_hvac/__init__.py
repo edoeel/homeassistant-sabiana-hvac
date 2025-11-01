@@ -18,7 +18,8 @@ if TYPE_CHECKING:
 
 from . import api
 from .api import create_session_client
-from .const import CONF_SHORT_JWT, DOMAIN
+from .const import CONF_LONG_JWT, CONF_SHORT_JWT, DOMAIN
+from .coordinator import SabianaTokenCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,19 +30,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the Sabiana HVAC integration from a config entry."""
     _LOGGER.info("Setting up Sabiana HVAC integration for entry %s", entry.entry_id)
 
-    if CONF_SHORT_JWT not in entry.data:
+    if CONF_SHORT_JWT not in entry.data or CONF_LONG_JWT not in entry.data:
         _LOGGER.error(
-            "Missing shortJwt in configuration for entry %s",
-            entry.entry_id
+            "Missing JWT tokens in configuration for entry %s",
+            entry.entry_id,
         )
         return False
 
     session = create_session_client(hass)
-    short_jwt = entry.data[CONF_SHORT_JWT]
+
+    coordinator = SabianaTokenCoordinator(hass, session, entry)
+
+    await coordinator.async_config_entry_first_refresh()
 
     try:
         _LOGGER.debug("Fetching devices from Sabiana API")
-        devices = await api.async_get_devices(session, short_jwt)
+        devices = await api.async_get_devices(session, coordinator.short_jwt.token)
         _LOGGER.info("Successfully retrieved %d devices from Sabiana API", len(devices))
     except api.SabianaApiAuthError as err:
         _LOGGER.warning(
@@ -58,7 +62,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
             "session": session,
-            CONF_SHORT_JWT: short_jwt,
+            "coordinator": coordinator,
             "devices": devices,
         }
         _LOGGER.debug(
@@ -73,7 +77,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         except Exception:
             _LOGGER.exception("Failed to setup platforms for entry %s", entry.entry_id)
-            return False
         else:
             return True
 
