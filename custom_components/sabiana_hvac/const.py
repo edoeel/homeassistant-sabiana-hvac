@@ -29,8 +29,13 @@ ERROR_TIMEOUT = "timeout_error"
 ERROR_API_ERROR = "api_error"
 ERROR_UNKNOWN = "unknown_error"
 
-CONF_SHORT_JWT = "shortJwt"
-CONF_LONG_JWT = "longJwt"
+CONF_SHORT_JWT = "short_jwt"
+CONF_SHORT_JWT_EXPIRE_AT = "short_jwt_expire_at"
+CONF_LONG_JWT = "long_jwt"
+CONF_LONG_JWT_EXPIRE_AT = "long_jwt_expire_at"
+
+SHORT_JWT_DURATION_SECONDS = 7200  # 2 hours
+LONG_JWT_DURATION_SECONDS = 7776000  # 90 days
 
 HVAC_MODE_MAP = {
     HVACMode.COOL: "0",

@@ -205,6 +205,20 @@ def extract_jwts(data: dict[str, Any]) -> tuple[str, str]:
     return data["body"]["user"]["shortJwt"], data["body"]["user"]["longJwt"]
 
 
+def extract_renewed_token(data: dict[str, Any]) -> str:
+    """
+    Extract newToken from renewJwt API response.
+
+    Args:
+        data: API response data dictionary.
+
+    Returns:
+        New short JWT token.
+
+    """
+    return data["body"]["newToken"]
+
+
 def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
     """
     Extract device list from API response.
@@ -340,7 +354,7 @@ async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> str:
     _LOGGER.debug("Renewing JWT with Sabiana API")
     response = await session.post(url, headers=headers, json=payload)
     data = validate_response(response)
-    short_jwt, _ = extract_jwts(data)
+    short_jwt = extract_renewed_token(data)
 
     _LOGGER.debug("Successfully renewed JWT with Sabiana API")
     return short_jwt
