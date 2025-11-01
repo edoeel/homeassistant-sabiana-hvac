@@ -14,16 +14,16 @@
 - [🚧 Limitations](#-limitations)
 - [🌟 Upcoming Features](#-upcoming-features)
 - [⚠️ Disclaimer & Legal Notice](#️-disclaimer--legal-notice)
-- [🤝 Contributing](#contributing)
-- [❓ Support](#support)
-- [📄 License](#license)
+- [🤝 Contributing](#-contributing)
+- [❓ Support](#-support)
+- [📄 License](#-license)
 
 Home Assistant custom integration designed to interface with Sabiana HVAC systems via their cloud API. This integration provides comprehensive control over your air conditioning units, seamlessly integrating them into your Home Assistant ecosystem.
 
 ## ✨ Features
 
 *   **🌡️ Advanced Climate Control:** Gain granular control over Sabiana HVAC units, including setting HVAC modes (e.g., Cool, Heat, Fan Only, Off), target temperatures, fan speeds (Low, Medium, High, Auto), and swing modes.
-*   **🔐 Secure API Authentication:** Utilizes secure, token-based authentication with the official Sabiana cloud API. User credentials (email and password) are securely stored exclusively on your local Home Assistant instance and are used solely for direct authentication with Sabiana servers.
+*   **🔐 Secure API Authentication:** Utilizes secure, JWT-based authentication with the official Sabiana cloud API. User credentials (email and password) are securely stored exclusively on your local Home Assistant instance and are used solely for direct authentication with Sabiana servers.
 *   **🖥️ Native Home Assistant UI Integration:** Devices are exposed as standard Home Assistant climate entities, enabling full control and monitoring through the native user interface, automations, and scripts.
 
 ## 📱 Screenshots
@@ -72,7 +72,6 @@ Home Assistant custom integration designed to interface with Sabiana HVAC system
 ## 🌟 Upcoming Features
 
 *   **Polling for Real-time State:** Implementation of a polling mechanism to retrieve and update the real-time operational state of each device. Currently, the device state is managed optimistically, meaning Home Assistant reflects the last commanded state rather than the actual device state.
-*   **Automatic Token Refresh:** Introduction of an automatic process for refreshing the authentication token. The current token has a validity period of approximately 6 months, requiring manual re-authentication upon expiration.
 
 ## ⚠️ Disclaimer & Legal Notice
 > **Important**: This integration is an unofficial independent project and is **not affiliated with, authorized, maintained, sponsored, or endorsed by Sabiana S.p.A.** or any of its affiliates or subsidiaries.
