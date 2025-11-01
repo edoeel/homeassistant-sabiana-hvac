@@ -191,7 +191,7 @@ def _validate_api_status(data: dict[str, Any]) -> None:
     raise SabianaApiClientError(error_message)
 
 
-def extract_JWTs(data: dict[str, Any]) -> tuple[str, str]:
+def extract_jwts(data: dict[str, Any]) -> tuple[str, str]:
     """
     Extract shortJwt and longJwt from API response.
 
@@ -282,7 +282,7 @@ async def async_authenticate(
     _LOGGER.debug("Authenticating with Sabiana API")
     response = await session.post(url, headers=headers, json=payload)
     data = validate_response(response)
-    short_jwt, long_jwt = extract_JWTs(data)
+    short_jwt, long_jwt = extract_jwts(data)
 
     _LOGGER.debug("Successfully authenticated with Sabiana API")
     return (short_jwt, long_jwt)
@@ -340,7 +340,7 @@ async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> str:
     _LOGGER.debug("Renewing JWT with Sabiana API")
     response = await session.post(url, headers=headers, json=payload)
     data = validate_response(response)
-    short_jwt, _ = extract_JWTs(data)
+    short_jwt, _ = extract_jwts(data)
 
     _LOGGER.debug("Successfully renewed JWT with Sabiana API")
     return short_jwt
