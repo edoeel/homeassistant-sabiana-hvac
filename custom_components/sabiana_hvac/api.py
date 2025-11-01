@@ -46,12 +46,12 @@ class SabianaDevice:
     name: str
 
 
-def create_headers(token: str | None = None) -> dict[str, str]:
+def create_headers(short_jwt: str | None = None) -> dict[str, str]:
     """
     Create HTTP headers for Sabiana API requests.
 
     Args:
-        token: Optional authentication token to include in headers.
+        short_jwt: Optional short-term JWT to include in headers.
 
     Returns:
         Dictionary containing HTTP headers for API requests.
@@ -68,8 +68,8 @@ def create_headers(token: str | None = None) -> dict[str, str]:
         "user-agent": USER_AGENT,
         "sec-fetch-dest": "empty",
     }
-    if token:
-        headers["auth"] = token
+    if short_jwt:
+        headers["auth"] = short_jwt
     return headers
 
 
@@ -174,18 +174,18 @@ def _validate_api_status(data: dict[str, Any]) -> None:
     raise SabianaApiClientError(error_message)
 
 
-def extract_token(data: dict[str, Any]) -> str:
+def extract_JWTs(data: dict[str, Any]) -> tuple[str, str]:
     """
-    Extract authentication token from API response.
+    Extract shortJwt and longJwt from API response.
 
     Args:
         data: API response data dictionary.
 
     Returns:
-        Authentication token string.
+        Tuple of (shortJwt, longJwt).
 
     """
-    return data["body"]["user"]["shortJwt"]
+    return data["body"]["user"]["shortJwt"], data["body"]["user"]["longJwt"]
 
 
 def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
@@ -239,7 +239,7 @@ def create_session_client(hass: HomeAssistant) -> httpx.AsyncClient:
 
 async def async_authenticate(
     session: httpx.AsyncClient, email: str, password: str
-) -> str:
+) -> tuple[str, str]:
     """
     Authenticate with Sabiana API using email and password.
 
@@ -249,7 +249,9 @@ async def async_authenticate(
         password: User password.
 
     Returns:
-        Authentication token string.
+        Tuple of (shortJwt, longJwt) where:
+        - shortJwt: The short-term JWT
+        - longJwt: The long-term JWT
 
     Raises:
         SabianaApiAuthError: If authentication fails.
@@ -263,20 +265,21 @@ async def async_authenticate(
     _LOGGER.debug("Authenticating with Sabiana API")
     response = await session.post(url, headers=headers, json=payload)
     data = validate_response(response)
-    token = extract_token(data)
+    short_jwt, long_jwt = extract_JWTs(data)
+
     _LOGGER.debug("Successfully authenticated with Sabiana API")
-    return token
+    return (short_jwt, long_jwt)
 
 
 async def async_get_devices(
-    session: httpx.AsyncClient, token: str
+    session: httpx.AsyncClient, short_jwt: str
 ) -> list[SabianaDevice]:
     """
     Fetch user devices from Sabiana API.
 
     Args:
         session: HTTP client session.
-        token: Authentication token.
+        short_jwt: Short-term JWT.
 
     Returns:
         List of SabianaDevice objects.
@@ -287,7 +290,7 @@ async def async_get_devices(
 
     """
     url = f"{BASE_URL}/devices/getDeviceForUserV2"
-    headers = create_headers(token)
+    headers = create_headers(short_jwt)
 
     _LOGGER.debug("Fetching devices from Sabiana API")
     response = await session.get(url, headers=headers)
@@ -298,14 +301,14 @@ async def async_get_devices(
 
 
 async def async_send_command(
-    session: httpx.AsyncClient, token: str, device_id: str, data: str
+    session: httpx.AsyncClient, short_jwt: str, device_id: str, data: str
 ) -> bool:
     """
     Send command to Sabiana device.
 
     Args:
         session: HTTP client session.
-        token: Authentication token.
+        short_jwt: Short-term JWT.
         device_id: Target device identifier.
         data: Command data string.
 
@@ -318,7 +321,7 @@ async def async_send_command(
 
     """
     url = f"{BASE_URL}/devices/cmd"
-    headers = create_headers(token)
+    headers = create_headers(short_jwt)
     payload = {"deviceID": device_id, "start": 2304, "data": data, "restart": False}
 
     _LOGGER.debug("Sending command to device %s: %s", device_id, data)

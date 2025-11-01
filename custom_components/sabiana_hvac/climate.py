@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 from . import api
 from .api import SabianaApiAuthError, SabianaApiClientError
 from .const import (
-    CONF_TOKEN,
+    CONF_SHORT_JWT,
     DOMAIN,
     FAN_MODE_MAP,
     HVAC_MODE_MAP,
@@ -56,7 +56,7 @@ async def async_setup_entry(
     """Set up climate entities for Sabiana HVAC devices."""
     entry_data = hass.data[DOMAIN][entry.entry_id]
     entities = [
-        SabianaHvacClimateEntity(entry_data["session"], entry_data[CONF_TOKEN], device)
+        SabianaHvacClimateEntity(entry_data["session"], entry_data[CONF_SHORT_JWT], device)
         for device in entry_data["devices"]
     ]
     async_add_entities(entities)
@@ -100,19 +100,19 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
     _attr_should_poll = False
 
     def __init__(
-        self, session: httpx.AsyncClient, token: str, device: api.SabianaDevice
+        self, session: httpx.AsyncClient, short_jwt: str, device: api.SabianaDevice
     ) -> None:
         """
         Initialize the Sabiana HVAC climate entity.
 
         Args:
             session: HTTP client session for API calls.
-            token: Authentication token for API requests.
+            short_jwt: Short-term JWT for API requests.
             device: Sabiana device information.
 
         """
         self._session = session
-        self._token = token
+        self._short_jwt = short_jwt
         self._device = device
         self._attr_unique_id = device.id
         self._attr_name = device.name
@@ -153,7 +153,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
 
         try:
             await api.async_send_command(
-                self._session, self._token, self._device.id, command_payload
+                self._session, self._short_jwt, self._device.id, command_payload
             )
             self.async_write_ha_state()
         except SabianaApiAuthError:

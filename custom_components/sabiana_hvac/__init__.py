@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 from . import api
 from .api import create_session_client
-from .const import CONF_TOKEN, DOMAIN
+from .const import CONF_SHORT_JWT, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,16 +29,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the Sabiana HVAC integration from a config entry."""
     _LOGGER.info("Setting up Sabiana HVAC integration for entry %s", entry.entry_id)
 
-    if CONF_TOKEN not in entry.data:
-        _LOGGER.error("Missing token in configuration for entry %s", entry.entry_id)
+    if CONF_SHORT_JWT not in entry.data:
+        _LOGGER.error(
+            "Missing shortJwt in configuration for entry %s",
+            entry.entry_id
+        )
         return False
 
     session = create_session_client(hass)
-    token = entry.data[CONF_TOKEN]
+    short_jwt = entry.data[CONF_SHORT_JWT]
 
     try:
         _LOGGER.debug("Fetching devices from Sabiana API")
-        devices = await api.async_get_devices(session, token)
+        devices = await api.async_get_devices(session, short_jwt)
         _LOGGER.info("Successfully retrieved %d devices from Sabiana API", len(devices))
     except api.SabianaApiAuthError as err:
         _LOGGER.warning(
@@ -55,7 +58,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
             "session": session,
-            "token": token,
+            CONF_SHORT_JWT: short_jwt,
             "devices": devices,
         }
         _LOGGER.debug(

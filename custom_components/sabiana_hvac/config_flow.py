@@ -6,6 +6,7 @@ integration through Home Assistant's config flow system.
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
@@ -16,7 +17,8 @@ from homeassistant.helpers.httpx_client import get_async_client
 
 from . import api
 from .const import (
-    CONF_TOKEN,
+    CONF_LONG_JWT,
+    CONF_SHORT_JWT,
     DOMAIN,
     ERROR_API_ERROR,
     ERROR_CANNOT_CONNECT,
@@ -32,6 +34,17 @@ class SabianaHvacConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle configuration flow for Sabiana HVAC integration."""
 
     VERSION = 1
+
+    def __init__(self, datetime: datetime) -> None:
+        """
+        Initialize the config flow.
+
+        Args:
+            datetime: The datetime module to use for time operations.
+
+        """
+        super().__init__()
+        self._datetime = datetime
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -54,7 +67,8 @@ class SabianaHvacConfigFlow(ConfigFlow, domain=DOMAIN):
 
             try:
                 session = get_async_client(self.hass)
-                token = await api.async_authenticate(session, email, password)
+                auth_result = await api.async_authenticate(session, email, password)
+                short_jwt, long_jwt = auth_result
                 _LOGGER.info("Successfully authenticated with Sabiana API")
 
             except api.SabianaApiAuthError as err:
@@ -87,7 +101,8 @@ class SabianaHvacConfigFlow(ConfigFlow, domain=DOMAIN):
                     data={
                         CONF_EMAIL: email,
                         CONF_PASSWORD: password,
-                        CONF_TOKEN: token,
+                        CONF_SHORT_JWT: short_jwt,
+                        CONF_LONG_JWT: long_jwt,
                     },
                 )
 
