@@ -6,7 +6,7 @@ integration through Home Assistant's config flow system.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import httpx

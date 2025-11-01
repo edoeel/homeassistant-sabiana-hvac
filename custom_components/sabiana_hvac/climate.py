@@ -56,7 +56,9 @@ async def async_setup_entry(
     """Set up climate entities for Sabiana HVAC devices."""
     entry_data = hass.data[DOMAIN][entry.entry_id]
     entities = [
-        SabianaHvacClimateEntity(entry_data["session"], entry_data[CONF_SHORT_JWT], device)
+        SabianaHvacClimateEntity(
+            entry_data["session"], entry_data[CONF_SHORT_JWT], device
+        )
         for device in entry_data["devices"]
     ]
     async_add_entities(entities)
