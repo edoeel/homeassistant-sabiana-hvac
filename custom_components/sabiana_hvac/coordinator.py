@@ -83,7 +83,9 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
 
         if now >= self.long_jwt.expire_at:
             _LOGGER.warning("Long JWT expired, performing full re-authentication")
-            return await self._async_reauth_and_update()
+            short_jwt, long_jwt = await self._async_reauth()
+            self._update_tokens(short_jwt, long_jwt)
+            return short_jwt.token
 
         if now >= self.short_jwt.expire_at:
             _LOGGER.debug("Short JWT expired, refreshing using long JWT")
@@ -97,7 +99,9 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
                     "re-authentication: %s",
                     err,
                 )
-                return await self._async_reauth_and_update()
+                short_jwt, long_jwt = await self._async_reauth()
+                self._update_tokens(short_jwt, long_jwt)
+                return short_jwt.token
             except api.SabianaApiClientError as err:
                 error_msg = f"API error: {err}"
                 _LOGGER.exception("API error during token refresh")
@@ -107,7 +111,6 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
                 _LOGGER.exception("Connection error during token refresh")
                 raise UpdateFailed(error_msg) from err
             else:
-                now = datetime.now(UTC)
                 new_short_jwt = JWT(
                     token=new_short_jwt_token,
                     expire_at=now + timedelta(seconds=SHORT_JWT_DURATION_SECONDS),
@@ -116,14 +119,26 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
                 _LOGGER.info("Successfully refreshed short JWT token")
                 return new_short_jwt_token
 
-        _LOGGER.debug("Tokens still valid, no refresh needed")
+        _LOGGER.debug(
+            "Tokens still valid, no refresh needed. "
+            "Short JWT expires at: %s, Long JWT expires at: %s",
+            self.short_jwt.expire_at.isoformat(),
+            self.long_jwt.expire_at.isoformat(),
+        )
         return self.short_jwt.token
 
-    async def _async_reauth_and_update(self) -> str:
+    async def _async_reauth(self) -> tuple[JWT, JWT]:
         """
-        Perform full re-authentication and update tokens.
+        Perform full re-authentication and return both JWT objects.
 
         Called automatically when the long JWT has expired.
+
+        Returns:
+            A tuple containing (short_jwt, long_jwt) as JWT objects.
+
+        Raises:
+            UpdateFailed: If credentials are missing or authentication fails.
+
         """
         email = self.config_entry.data.get(CONF_EMAIL)
         password = self.config_entry.data.get(CONF_PASSWORD)
@@ -152,21 +167,18 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
             error_msg = f"Connection error during auto re-authentication: {err}"
             _LOGGER.exception("Connection error during auto re-authentication")
             raise UpdateFailed(error_msg) from err
-        else:
-            now = datetime.now(UTC)
-            short_jwt = JWT(
-                token=new_short_jwt,
-                expire_at=now + timedelta(seconds=SHORT_JWT_DURATION_SECONDS),
-            )
-            long_jwt = JWT(
-                token=new_long_jwt,
-                expire_at=now + timedelta(seconds=LONG_JWT_DURATION_SECONDS),
-            )
-            self._update_tokens(short_jwt, long_jwt)
-            _LOGGER.info(
-                "Successfully re-authenticated and updated tokens automatically"
-            )
-            return new_short_jwt
+
+        now = datetime.now(UTC)
+        short_jwt = JWT(
+            token=new_short_jwt,
+            expire_at=now + timedelta(seconds=SHORT_JWT_DURATION_SECONDS),
+        )
+        long_jwt = JWT(
+            token=new_long_jwt,
+            expire_at=now + timedelta(seconds=LONG_JWT_DURATION_SECONDS),
+        )
+        _LOGGER.info("Successfully re-authenticated and obtained new tokens")
+        return short_jwt, long_jwt
 
     def _update_tokens(self, short_jwt: JWT, long_jwt: JWT | None = None) -> None:
         """Update tokens in config entry."""
