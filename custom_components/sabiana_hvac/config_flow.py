@@ -99,9 +99,9 @@ class SabianaHvacConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_EMAIL: email,
                         CONF_PASSWORD: password,
                         CONF_SHORT_JWT: short_jwt,
-                        CONF_SHORT_JWT_EXPIRE_AT: short_expire.isoformat(),
+                        CONF_SHORT_JWT_EXPIRE_AT: int(short_expire.timestamp()),
                         CONF_LONG_JWT: long_jwt,
-                        CONF_LONG_JWT_EXPIRE_AT: long_expire.isoformat(),
+                        CONF_LONG_JWT_EXPIRE_AT: int(long_expire.timestamp()),
                     },
                 )
 

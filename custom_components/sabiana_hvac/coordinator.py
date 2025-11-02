@@ -62,8 +62,8 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         """Get the current short JWT from config entry."""
         return JWT(
             token=self.config_entry.data[CONF_SHORT_JWT],
-            expire_at=datetime.fromisoformat(
-                self.config_entry.data[CONF_SHORT_JWT_EXPIRE_AT]
+            expire_at=datetime.fromtimestamp(
+                self.config_entry.data[CONF_SHORT_JWT_EXPIRE_AT], UTC
             ),
         )
 
@@ -72,8 +72,8 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         """Get the current long JWT from config entry."""
         return JWT(
             token=self.config_entry.data[CONF_LONG_JWT],
-            expire_at=datetime.fromisoformat(
-                self.config_entry.data[CONF_LONG_JWT_EXPIRE_AT]
+            expire_at=datetime.fromtimestamp(
+                self.config_entry.data[CONF_LONG_JWT_EXPIRE_AT], UTC
             ),
         )
 
@@ -125,6 +125,7 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
             self.short_jwt.expire_at.isoformat(),
             self.long_jwt.expire_at.isoformat(),
         )
+        _LOGGER.debug("Config entry data: %s", self.config_entry.data)
         return self.short_jwt.token
 
     async def _async_reauth(self) -> tuple[JWT, JWT]:
@@ -185,12 +186,12 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         data = {
             **self.config_entry.data,
             CONF_SHORT_JWT: short_jwt.token,
-            CONF_SHORT_JWT_EXPIRE_AT: short_jwt.expire_at.isoformat(),
+            CONF_SHORT_JWT_EXPIRE_AT: int(short_jwt.expire_at.timestamp()),
         }
 
         if long_jwt is not None:
             data[CONF_LONG_JWT] = long_jwt.token
-            data[CONF_LONG_JWT_EXPIRE_AT] = long_jwt.expire_at.isoformat()
+            data[CONF_LONG_JWT_EXPIRE_AT] = int(long_jwt.expire_at.timestamp())
 
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
         self.data = short_jwt.token
