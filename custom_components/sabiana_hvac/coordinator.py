@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -18,23 +17,14 @@ from .const import (
     CONF_SHORT_JWT,
     CONF_SHORT_JWT_EXPIRE_AT,
     DOMAIN,
-    LONG_JWT_DURATION_SECONDS,
-    SHORT_JWT_DURATION_SECONDS,
 )
+from .models import JWT
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
-
-
-@dataclass
-class JWT:
-    """Represents a JWT token with its expiration timestamp."""
-
-    token: str
-    expire_at: datetime
 
 
 class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
@@ -90,7 +80,7 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         if now >= self.short_jwt.expire_at:
             _LOGGER.debug("Short JWT expired, refreshing using long JWT")
             try:
-                new_short_jwt_token = await api.async_renew_jwt(
+                new_short_jwt = await api.async_renew_jwt(
                     self.session, self.long_jwt.token
                 )
             except api.SabianaApiAuthError as err:
@@ -111,13 +101,9 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
                 _LOGGER.exception("Connection error during token refresh")
                 raise UpdateFailed(error_msg) from err
             else:
-                new_short_jwt = JWT(
-                    token=new_short_jwt_token,
-                    expire_at=now + timedelta(seconds=SHORT_JWT_DURATION_SECONDS),
-                )
                 self._update_tokens(new_short_jwt)
                 _LOGGER.info("Successfully refreshed short JWT token")
-                return new_short_jwt_token
+                return new_short_jwt.token
 
         _LOGGER.debug(
             "Tokens still valid, no refresh needed. "
@@ -153,7 +139,7 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
 
         try:
             _LOGGER.info("Performing automatic re-authentication with email: %s", email)
-            new_short_jwt, new_long_jwt = await api.async_authenticate(
+            short_jwt, long_jwt = await api.async_authenticate(
                 self.session, email, password
             )
         except api.SabianaApiAuthError as err:
@@ -169,15 +155,6 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
             _LOGGER.exception("Connection error during auto re-authentication")
             raise UpdateFailed(error_msg) from err
 
-        now = datetime.now(UTC)
-        short_jwt = JWT(
-            token=new_short_jwt,
-            expire_at=now + timedelta(seconds=SHORT_JWT_DURATION_SECONDS),
-        )
-        long_jwt = JWT(
-            token=new_long_jwt,
-            expire_at=now + timedelta(seconds=LONG_JWT_DURATION_SECONDS),
-        )
         _LOGGER.info("Successfully re-authenticated and obtained new tokens")
         return short_jwt, long_jwt
 

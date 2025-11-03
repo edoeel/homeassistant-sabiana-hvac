@@ -5,8 +5,11 @@ This module provides functions to interact with the Sabiana API,
 including authentication, device management, and command sending.
 """
 
+import base64
+import json
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -15,6 +18,7 @@ from homeassistant.helpers.httpx_client import create_async_httpx_client
 from httpx_retries import Retry, RetryTransport
 
 from .const import BASE_URL, USER_AGENT
+from .models import JWT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -191,7 +195,74 @@ def _validate_api_status(data: dict[str, Any]) -> None:
     raise SabianaApiClientError(error_message)
 
 
-def extract_jwts(data: dict[str, Any]) -> tuple[str, str]:
+def _extract_jwt_expiry(token: str) -> datetime:
+    """
+    Extract expiration timestamp from JWT token's 'exp' claim.
+
+    Args:
+        token: JWT token string.
+
+    Returns:
+        Expiration datetime from the JWT token.
+
+    Raises:
+        SabianaApiClientError: If token is malformed or missing 'exp' claim.
+
+    """
+    jwt_parts_count = 3
+    base64_padding_mod = 4
+
+    def _raise_value_error(message: str) -> None:
+        """Raise ValueError with the given message."""
+        raise ValueError(message)
+
+    try:
+        parts = token.split(".")
+        if len(parts) != jwt_parts_count:
+            error_msg = "Invalid JWT format: expected 3 parts"
+            _raise_value_error(error_msg)
+
+        payload_encoded = parts[1]
+        padding = len(payload_encoded) % base64_padding_mod
+        if padding:
+            payload_encoded += "=" * (base64_padding_mod - padding)
+
+        payload_bytes = base64.urlsafe_b64decode(payload_encoded)
+        payload_str = payload_bytes.decode("utf-8")
+        payload = json.loads(payload_str)
+
+        exp_timestamp = payload.get("exp")
+        if exp_timestamp is None:
+            error_msg = "JWT token missing 'exp' claim"
+            _raise_value_error(error_msg)
+
+        return datetime.fromtimestamp(exp_timestamp, tz=UTC)
+
+    except (ValueError, json.JSONDecodeError, KeyError, IndexError) as err:
+        error_msg = f"Failed to extract expiry from JWT token: {err}"
+        _LOGGER.exception(error_msg)
+        raise SabianaApiClientError(error_msg) from err
+
+
+def _create_jwt(token: str) -> JWT:
+    """
+    Create a JWT object with expiration extracted from the token's 'exp' claim.
+
+    Args:
+        token: JWT token string.
+
+    Returns:
+        JWT object with token and expiration timestamp from the JWT.
+
+    Raises:
+        SabianaApiClientError: If token is malformed or missing 'exp' claim.
+
+    """
+    expire_at = _extract_jwt_expiry(token)
+    return JWT(token=token, expire_at=expire_at)
+
+
+def extract_jwts(data: dict[str, Any]) -> tuple[JWT, JWT]:
     """
     Extract shortJwt and longJwt from API response.
 
@@ -199,13 +270,18 @@ def extract_jwts(data: dict[str, Any]) -> tuple[str, str]:
         data: API response data dictionary.
 
     Returns:
-        Tuple of (shortJwt, longJwt).
+        Tuple of (shortJwt, longJwt) as JWT objects.
 
     """
-    return data["body"]["user"]["shortJwt"], data["body"]["user"]["longJwt"]
+    short_jwt_token = data["body"]["user"]["shortJwt"]
+    long_jwt_token = data["body"]["user"]["longJwt"]
+    return (
+        _create_jwt(short_jwt_token),
+        _create_jwt(long_jwt_token),
+    )
 
 
-def extract_renewed_token(data: dict[str, Any]) -> str:
+def extract_renewed_token(data: dict[str, Any]) -> JWT:
     """
     Extract newToken from renewJwt API response.
 
@@ -213,10 +289,10 @@ def extract_renewed_token(data: dict[str, Any]) -> str:
         data: API response data dictionary.
 
     Returns:
-        New short JWT token.
+        New short JWT object.
 
     """
-    return data["body"]["newToken"]
+    return _create_jwt(data["body"]["newToken"])
 
 
 def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
@@ -270,7 +346,7 @@ def create_session_client(hass: HomeAssistant) -> httpx.AsyncClient:
 
 async def async_authenticate(
     session: httpx.AsyncClient, email: str, password: str
-) -> tuple[str, str]:
+) -> tuple[JWT, JWT]:
     """
     Authenticate with Sabiana API using email and password.
 
@@ -280,9 +356,7 @@ async def async_authenticate(
         password: User password.
 
     Returns:
-        Tuple of (shortJwt, longJwt) where:
-        - shortJwt: The short-term JWT
-        - longJwt: The long-term JWT
+        Tuple of (shortJwt, longJwt) as JWT objects.
 
     Raises:
         SabianaApiAuthError: If authentication fails.
@@ -297,7 +371,6 @@ async def async_authenticate(
     response = await session.post(url, headers=headers, json=payload)
     data = validate_response(response)
     short_jwt, long_jwt = extract_jwts(data)
-
     _LOGGER.debug("Successfully authenticated with Sabiana API")
     return (short_jwt, long_jwt)
 
@@ -331,7 +404,7 @@ async def async_get_devices(
     return devices
 
 
-async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> str:
+async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> JWT:
     """
     Renew short-term JWT using long-term JWT.
 
@@ -340,7 +413,7 @@ async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> str:
         long_jwt: Long-term JWT used for renewal.
 
     Returns:
-        New short-term JWT.
+        New short JWT object.
 
     Raises:
         SabianaApiAuthError: If authentication fails.
@@ -354,10 +427,8 @@ async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> str:
     _LOGGER.debug("Renewing JWT with Sabiana API")
     response = await session.post(url, headers=headers, json=payload)
     data = validate_response(response)
-    short_jwt = extract_renewed_token(data)
-
     _LOGGER.debug("Successfully renewed JWT with Sabiana API")
-    return short_jwt
+    return extract_renewed_token(data)
 
 
 async def async_send_command(

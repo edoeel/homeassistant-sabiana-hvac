@@ -6,7 +6,6 @@ integration through Home Assistant's config flow system.
 """
 
 import logging
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -27,8 +26,6 @@ from .const import (
     ERROR_INVALID_AUTH,
     ERROR_TIMEOUT,
     ERROR_UNKNOWN,
-    LONG_JWT_DURATION_SECONDS,
-    SHORT_JWT_DURATION_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,8 +57,9 @@ class SabianaHvacConfigFlow(ConfigFlow, domain=DOMAIN):
 
             try:
                 session = get_async_client(self.hass)
-                auth_result = await api.async_authenticate(session, email, password)
-                short_jwt, long_jwt = auth_result
+                short_jwt, long_jwt = await api.async_authenticate(
+                    session, email, password
+                )
                 _LOGGER.info("Successfully authenticated with Sabiana API")
 
             except api.SabianaApiAuthError as err:
@@ -89,19 +87,15 @@ class SabianaHvacConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(email.lower())
                 self._abort_if_unique_id_configured()
 
-                now = datetime.now(UTC)
-                short_expire = now + timedelta(seconds=SHORT_JWT_DURATION_SECONDS)
-                long_expire = now + timedelta(seconds=LONG_JWT_DURATION_SECONDS)
-
                 return self.async_create_entry(
                     title=f"Sabiana HVAC ({email})",
                     data={
                         CONF_EMAIL: email,
                         CONF_PASSWORD: password,
-                        CONF_SHORT_JWT: short_jwt,
-                        CONF_SHORT_JWT_EXPIRE_AT: int(short_expire.timestamp()),
-                        CONF_LONG_JWT: long_jwt,
-                        CONF_LONG_JWT_EXPIRE_AT: int(long_expire.timestamp()),
+                        CONF_SHORT_JWT: short_jwt.token,
+                        CONF_SHORT_JWT_EXPIRE_AT: int(short_jwt.expire_at.timestamp()),
+                        CONF_LONG_JWT: long_jwt.token,
+                        CONF_LONG_JWT_EXPIRE_AT: int(long_jwt.expire_at.timestamp()),
                     },
                 )
 
