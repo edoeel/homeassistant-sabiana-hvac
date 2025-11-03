@@ -34,7 +34,7 @@ CONF_SHORT_JWT_EXPIRE_AT = "short_jwt_expire_at"
 CONF_LONG_JWT = "long_jwt"
 CONF_LONG_JWT_EXPIRE_AT = "long_jwt_expire_at"
 
-SHORT_JWT_DURATION_SECONDS = 7200  # 2 hours
+SHORT_JWT_DURATION_SECONDS = 600  # 10 minutes
 LONG_JWT_DURATION_SECONDS = 7776000  # 90 days
 
 HVAC_MODE_MAP = {
