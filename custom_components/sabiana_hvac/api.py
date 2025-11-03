@@ -5,9 +5,11 @@ This module provides functions to interact with the Sabiana API,
 including authentication, device management, and command sending.
 """
 
+import base64
+import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -193,18 +195,70 @@ def _validate_api_status(data: dict[str, Any]) -> None:
     raise SabianaApiClientError(error_message)
 
 
-def _create_jwt(token: str) -> JWT:
+def _extract_jwt_expiry(token: str) -> datetime:
     """
-    Create a JWT object with expiration.
+    Extract expiration timestamp from JWT token's 'exp' claim.
 
     Args:
         token: JWT token string.
 
     Returns:
-        JWT object with token and expiration timestamp.
+        Expiration datetime from the JWT token.
+
+    Raises:
+        SabianaApiClientError: If token is malformed or missing 'exp' claim.
 
     """
-    expire_at = datetime.now(UTC) + timedelta(minutes=10)
+    jwt_parts_count = 3
+    base64_padding_mod = 4
+
+    def _raise_value_error(message: str) -> None:
+        """Raise ValueError with the given message."""
+        raise ValueError(message)
+
+    try:
+        parts = token.split(".")
+        if len(parts) != jwt_parts_count:
+            error_msg = "Invalid JWT format: expected 3 parts"
+            _raise_value_error(error_msg)
+
+        payload_encoded = parts[1]
+        padding = len(payload_encoded) % base64_padding_mod
+        if padding:
+            payload_encoded += "=" * (base64_padding_mod - padding)
+
+        payload_bytes = base64.urlsafe_b64decode(payload_encoded)
+        payload_str = payload_bytes.decode("utf-8")
+        payload = json.loads(payload_str)
+
+        exp_timestamp = payload.get("exp")
+        if exp_timestamp is None:
+            error_msg = "JWT token missing 'exp' claim"
+            _raise_value_error(error_msg)
+
+        return datetime.fromtimestamp(exp_timestamp, tz=UTC)
+
+    except (ValueError, json.JSONDecodeError, KeyError, IndexError) as err:
+        error_msg = f"Failed to extract expiry from JWT token: {err}"
+        _LOGGER.exception(error_msg)
+        raise SabianaApiClientError(error_msg) from err
+
+
+def _create_jwt(token: str) -> JWT:
+    """
+    Create a JWT object with expiration extracted from the token's 'exp' claim.
+
+    Args:
+        token: JWT token string.
+
+    Returns:
+        JWT object with token and expiration timestamp from the JWT.
+
+    Raises:
+        SabianaApiClientError: If token is malformed or missing 'exp' claim.
+
+    """
+    expire_at = _extract_jwt_expiry(token)
     return JWT(token=token, expire_at=expire_at)
 
 
