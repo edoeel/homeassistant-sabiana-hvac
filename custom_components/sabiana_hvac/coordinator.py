@@ -53,7 +53,8 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         return JWT(
             token=self.config_entry.data[CONF_SHORT_JWT],
             expire_at=datetime.fromtimestamp(
-                self.config_entry.data[CONF_SHORT_JWT_EXPIRE_AT], UTC
+                self.config_entry.data[CONF_SHORT_JWT_EXPIRE_AT],
+                UTC,
             ),
         )
 
@@ -63,7 +64,8 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         return JWT(
             token=self.config_entry.data[CONF_LONG_JWT],
             expire_at=datetime.fromtimestamp(
-                self.config_entry.data[CONF_LONG_JWT_EXPIRE_AT], UTC
+                self.config_entry.data[CONF_LONG_JWT_EXPIRE_AT],
+                UTC,
             ),
         )
 
@@ -81,7 +83,8 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
             _LOGGER.debug("Short JWT expired, refreshing using long JWT")
             try:
                 new_short_jwt = await api.async_renew_jwt(
-                    self.session, self.long_jwt.token
+                    self.session,
+                    self.long_jwt.token,
                 )
             except api.SabianaApiAuthError as err:
                 _LOGGER.warning(
@@ -115,8 +118,7 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         return self.short_jwt.token
 
     async def _async_reauth(self) -> tuple[JWT, JWT]:
-        """
-        Perform full re-authentication and return both JWT objects.
+        """Perform full re-authentication and return both JWT objects.
 
         Called automatically when the long JWT has expired.
 
@@ -140,7 +142,9 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         try:
             _LOGGER.info("Performing automatic re-authentication with email: %s", email)
             short_jwt, long_jwt = await api.async_authenticate(
-                self.session, email, password
+                self.session,
+                email,
+                password,
             )
         except api.SabianaApiAuthError as err:
             error_msg = f"Auto re-authentication failed with stored credentials: {err}"

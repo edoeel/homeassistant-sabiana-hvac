@@ -1,5 +1,4 @@
-"""
-Constants for Sabiana HVAC integration.
+"""Constants for Sabiana HVAC integration.
 
 This module contains all the constants used throughout the integration,
 including API endpoints, configuration keys, and mapping dictionaries.

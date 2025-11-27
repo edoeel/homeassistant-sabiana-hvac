@@ -1,5 +1,4 @@
-"""
-API client for Sabiana HVAC systems.
+"""API client for Sabiana HVAC systems.
 
 This module provides functions to interact with the Sabiana API,
 including authentication, device management, and command sending.
@@ -37,8 +36,7 @@ class SabianaApiAuthError(SabianaApiClientError):
 
 @dataclass(frozen=True)
 class SabianaDevice:
-    """
-    Represents a Sabiana HVAC device.
+    """Represents a Sabiana HVAC device.
 
     Attributes:
         id: Unique device identifier.
@@ -51,8 +49,7 @@ class SabianaDevice:
 
 
 def create_headers(short_jwt: str | None = None) -> dict[str, str]:
-    """
-    Create HTTP headers for Sabiana API requests.
+    """Create HTTP headers for Sabiana API requests.
 
     Args:
         short_jwt: Optional short-term JWT to include in headers.
@@ -78,8 +75,7 @@ def create_headers(short_jwt: str | None = None) -> dict[str, str]:
 
 
 def create_headers_renew(long_jwt: str) -> dict[str, str]:
-    """
-    Create HTTP headers for JWT renewal requests.
+    """Create HTTP headers for JWT renewal requests.
 
     Args:
         long_jwt: Long-term JWT to include in headers as "renewauth".
@@ -95,8 +91,7 @@ def create_headers_renew(long_jwt: str) -> dict[str, str]:
 
 
 def is_http_error(status: int) -> bool:
-    """
-    Check if HTTP status code indicates an error.
+    """Check if HTTP status code indicates an error.
 
     Args:
         status: HTTP status code to check.
@@ -109,8 +104,7 @@ def is_http_error(status: int) -> bool:
 
 
 def is_auth_error(status: int) -> bool:
-    """
-    Check if HTTP status code indicates authentication error.
+    """Check if HTTP status code indicates authentication error.
 
     Args:
         status: HTTP status code to check.
@@ -123,8 +117,7 @@ def is_auth_error(status: int) -> bool:
 
 
 def is_api_error(data: dict[str, Any]) -> bool:
-    """
-    Check if API response indicates an error.
+    """Check if API response indicates an error.
 
     Args:
         data: API response data dictionary.
@@ -137,8 +130,7 @@ def is_api_error(data: dict[str, Any]) -> bool:
 
 
 def is_auth_api_error(data: dict[str, Any]) -> bool:
-    """
-    Check if API response indicates authentication error.
+    """Check if API response indicates authentication error.
 
     Args:
         data: API response data dictionary.
@@ -151,8 +143,7 @@ def is_auth_api_error(data: dict[str, Any]) -> bool:
 
 
 def validate_response(response: httpx.Response) -> dict[str, Any]:
-    """
-    Validate HTTP response and return parsed JSON data.
+    """Validate HTTP response and return parsed JSON data.
 
     Args:
         response: HTTP response object to validate.
@@ -196,8 +187,7 @@ def _validate_api_status(data: dict[str, Any]) -> None:
 
 
 def _extract_jwt_expiry(token: str) -> datetime:
-    """
-    Extract expiration timestamp from JWT token's 'exp' claim.
+    """Extract expiration timestamp from JWT token's 'exp' claim.
 
     Args:
         token: JWT token string.
@@ -245,8 +235,7 @@ def _extract_jwt_expiry(token: str) -> datetime:
 
 
 def _create_jwt(token: str) -> JWT:
-    """
-    Create a JWT object with expiration extracted from the token's 'exp' claim.
+    """Create a JWT object with expiration extracted from the token's 'exp' claim.
 
     Args:
         token: JWT token string.
@@ -263,8 +252,7 @@ def _create_jwt(token: str) -> JWT:
 
 
 def extract_jwts(data: dict[str, Any]) -> tuple[JWT, JWT]:
-    """
-    Extract shortJwt and longJwt from API response.
+    """Extract shortJwt and longJwt from API response.
 
     Args:
         data: API response data dictionary.
@@ -282,8 +270,7 @@ def extract_jwts(data: dict[str, Any]) -> tuple[JWT, JWT]:
 
 
 def extract_renewed_token(data: dict[str, Any]) -> JWT:
-    """
-    Extract newToken from renewJwt API response.
+    """Extract newToken from renewJwt API response.
 
     Args:
         data: API response data dictionary.
@@ -296,8 +283,7 @@ def extract_renewed_token(data: dict[str, Any]) -> JWT:
 
 
 def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
-    """
-    Extract device list from API response.
+    """Extract device list from API response.
 
     Args:
         data: API response data dictionary.
@@ -311,8 +297,7 @@ def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
 
 
 def extract_result(data: dict[str, Any]) -> bool:
-    """
-    Extract result status from API response.
+    """Extract result status from API response.
 
     Args:
         data: API response data dictionary.
@@ -325,8 +310,7 @@ def extract_result(data: dict[str, Any]) -> bool:
 
 
 def create_session_client(hass: HomeAssistant) -> httpx.AsyncClient:
-    """
-    Create HTTP client with retry logic for Sabiana API.
+    """Create HTTP client with retry logic for Sabiana API.
 
     Args:
         hass: Home Assistant instance.
@@ -345,10 +329,11 @@ def create_session_client(hass: HomeAssistant) -> httpx.AsyncClient:
 
 
 async def async_authenticate(
-    session: httpx.AsyncClient, email: str, password: str
+    session: httpx.AsyncClient,
+    email: str,
+    password: str,
 ) -> tuple[JWT, JWT]:
-    """
-    Authenticate with Sabiana API using email and password.
+    """Authenticate with Sabiana API using email and password.
 
     Args:
         session: HTTP client session.
@@ -376,10 +361,10 @@ async def async_authenticate(
 
 
 async def async_get_devices(
-    session: httpx.AsyncClient, short_jwt: str
+    session: httpx.AsyncClient,
+    short_jwt: str,
 ) -> list[SabianaDevice]:
-    """
-    Fetch user devices from Sabiana API.
+    """Fetch user devices from Sabiana API.
 
     Args:
         session: HTTP client session.
@@ -405,8 +390,7 @@ async def async_get_devices(
 
 
 async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> JWT:
-    """
-    Renew short-term JWT using long-term JWT.
+    """Renew short-term JWT using long-term JWT.
 
     Args:
         session: HTTP client session.
@@ -432,10 +416,12 @@ async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> JWT:
 
 
 async def async_send_command(
-    session: httpx.AsyncClient, short_jwt: str, device_id: str, data: str
+    session: httpx.AsyncClient,
+    short_jwt: str,
+    device_id: str,
+    data: str,
 ) -> bool:
-    """
-    Send command to Sabiana device.
+    """Send command to Sabiana device.
 
     Args:
         session: HTTP client session.
