@@ -17,7 +17,7 @@ from homeassistant.helpers.httpx_client import create_async_httpx_client
 from httpx_retries import Retry, RetryTransport
 
 from .const import BASE_URL, USER_AGENT
-from .models import JWT
+from .models import JWT, SabianaDeviceState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -294,6 +294,265 @@ def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
     """
     devices_data = data.get("body", {}).get("devices", [])
     return [SabianaDevice(id=d["idDevice"], name=d["deviceName"]) for d in devices_data]
+
+
+def decode_last_data(hex_string: str) -> SabianaDeviceState:
+    """
+    Decode the lastData hex string into a SabianaDeviceState.
+    
+    Based on the official Sabiana Android app decoder (androidAppJs.js line 640-790).
+    
+    Byte Structure:
+        Bytes 1-2:  Controller model (hex)
+        Byte 4:     Fan mode
+        Byte 5:     HVAC mode (lower nibble)
+        Byte 6:     Flags (swing on bit 0)
+        Byte 7:     Power state (lower nibble) and Sleep mode (upper nibble = 0xE)
+        Byte 11:    Current temperature * 10
+        Bytes 14-15: Target temperature * 10 (big-endian)
+    
+    Returns:
+        SabianaDeviceState with decoded values or None values if decoding fails.
+    """
+    # Constants for decoding
+    MIN_DATA_LENGTH = 16
+    TEMP_SCALE_FACTOR = 10.0
+    
+    # Byte indices
+    BYTE_MODEL_1 = 1
+    BYTE_MODEL_2 = 2
+    BYTE_FAN_MODE = 4
+    BYTE_HVAC_MODE = 5
+    BYTE_FLAGS = 6
+    BYTE_POWER_SLEEP = 7
+    BYTE_CURRENT_TEMP = 11
+    BYTE_TARGET_TEMP_HIGH = 14
+    BYTE_TARGET_TEMP_LOW = 15
+    
+    # Bit masks
+    MASK_LOWER_NIBBLE = 0x0F
+    MASK_UPPER_NIBBLE = 0xF0
+    MASK_SWING_BIT = 0x01
+    
+    # Sleep mode indicator (byte 7 upper nibble)
+    SLEEP_MODE_INDICATOR = 0xE
+    
+    try:
+        data = bytes.fromhex(hex_string)
+        
+        # Validate minimum data length
+        if len(data) < MIN_DATA_LENGTH:
+            _LOGGER.warning("lastData too short: %d bytes (minimum %d required)", len(data), MIN_DATA_LENGTH)
+            return _create_empty_device_state(hex_string)
+        
+        # Decode controller model (bytes 1-2)
+        controller_model = _decode_controller_model(data)
+        
+        # Decode temperatures
+        current_temp = _decode_current_temperature(data[BYTE_CURRENT_TEMP])
+        target_temp = _decode_target_temperature(data[BYTE_TARGET_TEMP_HIGH], data[BYTE_TARGET_TEMP_LOW])
+        
+        # Decode HVAC mode and power state
+        hvac_mode, power_on = _decode_hvac_mode_and_power(
+            data[BYTE_HVAC_MODE],
+            data[BYTE_POWER_SLEEP]
+        )
+        
+        # Decode fan mode (byte 4)
+        fan_mode = _decode_fan_mode(data[BYTE_FAN_MODE])
+        
+        # Decode sleep/preset mode (byte 7 upper nibble)
+        preset_mode = _decode_preset_mode(data[BYTE_POWER_SLEEP])
+        
+        # Decode swing mode (byte 6 bit 0)
+        swing_mode = "on" if data[BYTE_FLAGS] & MASK_SWING_BIT else "off"
+        
+        return SabianaDeviceState(
+            hvac_mode=hvac_mode,
+            target_temperature=target_temp,
+            current_temperature=current_temp,
+            fan_mode=fan_mode,
+            swing_mode=swing_mode,
+            preset_mode=preset_mode,
+            power_on=power_on,
+            controller_model=controller_model,
+            raw_state={"lastData": hex_string, "decoded_bytes": list(data)},
+        )
+        
+    except (ValueError, IndexError) as err:
+        _LOGGER.exception("Failed to decode lastData: %s", err)
+        return _create_empty_device_state(hex_string, error=str(err))
+
+
+def _create_empty_device_state(hex_string: str, error: str | None = None) -> SabianaDeviceState:
+    """Create a SabianaDeviceState with all None values."""
+    raw_state = {"lastData": hex_string}
+    if error:
+        raw_state["error"] = error
+    
+    return SabianaDeviceState(
+        hvac_mode=None,
+        target_temperature=None,
+        current_temperature=None,
+        fan_mode=None,
+        swing_mode=None,
+        preset_mode=None,
+        power_on=None,
+        controller_model=None,
+        raw_state=raw_state,
+    )
+
+
+def _decode_controller_model(data: bytes) -> str:
+    """
+    Decode controller model from bytes 1-2.
+    
+    Args:
+        data: Raw byte data from device.
+        
+    Returns:
+        Controller model as hex string (e.g., "2000") or "UNKNOWN".
+    """
+    if len(data) > 2:
+        return f"{data[1]:02X}{data[2]:02X}"
+    return "UNKNOWN"
+
+
+def _decode_current_temperature(temp_byte: int) -> float | None:
+    """
+    Decode current temperature from byte 11.
+    
+    Args:
+        temp_byte: Temperature byte value.
+        
+    Returns:
+        Temperature in Celsius or None if invalid.
+    """
+    return temp_byte / 10.0 if temp_byte > 0 else None
+
+
+def _decode_target_temperature(high_byte: int, low_byte: int) -> float | None:
+    """
+    Decode target temperature from bytes 14-15 (big-endian).
+    
+    Args:
+        high_byte: High byte of temperature.
+        low_byte: Low byte of temperature.
+        
+    Returns:
+        Temperature in Celsius or None if invalid.
+    """
+    if high_byte or low_byte:
+        return ((high_byte << 8) | low_byte) / 10.0
+    return None
+
+
+def _decode_hvac_mode_and_power(mode_byte: int, power_byte: int) -> tuple[str, bool]:
+    """
+    Decode HVAC mode and power state.
+    
+    HVAC mode is in byte 5 (lower nibble).
+    Power state is determined by byte 7 (lower nibble = 0 means OFF).
+    
+    Args:
+        mode_byte: Byte 5 containing HVAC mode.
+        power_byte: Byte 7 containing power state.
+        
+    Returns:
+        Tuple of (hvac_mode, power_on).
+    """
+    # HVAC mode mapping (byte 5 lower nibble)
+    HVAC_MODE_MAP = {
+        0x00: "cool",       # MODE_SUMMER
+        0x01: "heat",       # MODE_WINTER
+        0x02: "heat_cool",  # MODE_AUTO
+        0x03: "fan_only",   # MODE_FAN_ONLY
+    }
+    
+    mode_nibble = mode_byte & 0x0F
+    hvac_mode = HVAC_MODE_MAP.get(mode_nibble, "heat")
+    
+    # Check power state (byte 7 lower nibble = 0 means OFF)
+    power_nibble = power_byte & 0x0F
+    if power_nibble == 0x00:
+        hvac_mode = "off"
+        power_on = False
+    else:
+        power_on = True
+    
+    return hvac_mode, power_on
+
+
+def _decode_fan_mode(fan_byte: int) -> str:
+    """
+    Decode fan mode from byte 4.
+    
+    Verified mappings from actual device testing:
+    - 0x04: AUTO
+    - 0x14: LOW
+    - 0x3C: MEDIUM
+    - 0x6E: HIGH
+    
+    Args:
+        fan_byte: Byte 4 value.
+        
+    Returns:
+        Fan mode string (low, medium, high, auto).
+    """
+    FAN_MODE_MAP = {
+        0x04: "auto",
+        0x14: "low",
+        0x1C: "low",      # Alternate encoding
+        0x3C: "medium",
+        0x4C: "medium",   # Alternate encoding
+        0x6E: "high",
+        0x7E: "high",     # Alternate encoding
+    }
+    
+    fan_mode = FAN_MODE_MAP.get(fan_byte)
+    
+    if fan_mode is None:
+        _LOGGER.warning("Unknown fan mode byte: 0x%02X, defaulting to auto", fan_byte)
+        return "auto"
+    
+    return fan_mode
+
+
+def _decode_preset_mode(power_sleep_byte: int) -> str:
+    """
+    Decode preset/sleep mode from byte 7 upper nibble.
+    
+    Sleep mode is indicated when byte 7 upper nibble = 0xE.
+    This works for ANY fan mode (auto, low, medium, high).
+    
+    Args:
+        power_sleep_byte: Byte 7 value.
+        
+    Returns:
+        Preset mode string ("sleep" or "none").
+    """
+    SLEEP_MODE_INDICATOR = 0xE
+    
+    upper_nibble = (power_sleep_byte & 0xF0) >> 4
+    
+    return "sleep" if upper_nibble == SLEEP_MODE_INDICATOR else "none"
+
+
+def extract_device_states_from_devices(data: dict[str, Any]) -> dict[str, SabianaDeviceState]:
+    """Extract device states from getDeviceForUserV2 response by decoding lastData."""
+    devices = data.get("body", {}).get("devices", [])
+    states = {}
+    
+    for device in devices:
+        device_id = str(device.get("idDevice", ""))
+        device_name = str(device.get("deviceName", ""))
+        last_data = device.get("lastData", "")
+        
+        if device_id and last_data:
+            states[device_id] = decode_last_data(last_data)
+            _LOGGER.debug("Decoded state for device id %s and name %s: %s", device_id, device_name, states[device_id])
+    
+    return states
 
 
 def extract_result(data: dict[str, Any]) -> bool:
