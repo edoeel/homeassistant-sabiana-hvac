@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 from . import api
 from .api import create_session_client
 from .const import CONF_LONG_JWT, CONF_SHORT_JWT, DOMAIN
-from .coordinator import SabianaTokenCoordinator
+from .coordinator import SabianaDeviceCoordinator, SabianaTokenCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,9 +61,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.exception("Unexpected error during setup for entry %s", entry.entry_id)
     else:
+        device_coordinator = SabianaDeviceCoordinator(
+            hass,
+            session,
+            coordinator,
+            [device.id for device in devices],
+        )
+
+        await device_coordinator.async_config_entry_first_refresh()
+
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
             "session": session,
-            "coordinator": coordinator,
+            "token_coordinator": coordinator,
+            "device_coordinator": device_coordinator,
             "devices": devices,
         }
         _LOGGER.debug(
@@ -94,7 +104,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         if unload_ok:
             if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
-                hass.data[DOMAIN].pop(entry.entry_id)
+                stored_entry = hass.data[DOMAIN].pop(entry.entry_id)
+                if device_coordinator := stored_entry.get("device_coordinator"):
+                    await device_coordinator.async_shutdown()
                 _LOGGER.debug("Cleaned up data for entry %s", entry.entry_id)
             _LOGGER.info(
                 "Successfully unloaded Sabiana HVAC integration for entry %s",
