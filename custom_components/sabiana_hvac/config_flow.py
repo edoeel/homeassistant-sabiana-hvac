@@ -1,5 +1,4 @@
-"""
-Configuration flow for Sabiana HVAC integration.
+"""Configuration flow for Sabiana HVAC integration.
 
 This module handles the setup and configuration of the Sabiana HVAC
 integration through Home Assistant's config flow system.
@@ -37,10 +36,10 @@ class SabianaHvacConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
+        self,
+        user_input: dict[str, Any] | None = None,
     ) -> ConfigFlowResult:
-        """
-        Handle the initial step of the config flow.
+        """Handle the initial step of the config flow.
 
         Args:
             user_input: User input data containing email and password.
@@ -58,13 +57,17 @@ class SabianaHvacConfigFlow(ConfigFlow, domain=DOMAIN):
             try:
                 session = get_async_client(self.hass)
                 short_jwt, long_jwt = await api.async_authenticate(
-                    session, email, password
+                    session,
+                    email,
+                    password,
                 )
                 _LOGGER.info("Successfully authenticated with Sabiana API")
 
             except api.SabianaApiAuthError as err:
                 _LOGGER.warning(
-                    "Authentication failed (%s): %s", ERROR_INVALID_AUTH, err
+                    "Authentication failed (%s): %s",
+                    ERROR_INVALID_AUTH,
+                    err,
                 )
                 errors["base"] = ERROR_INVALID_AUTH
             except httpx.ConnectError:
@@ -105,7 +108,7 @@ class SabianaHvacConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_EMAIL): str,
                     vol.Required(CONF_PASSWORD): str,
-                }
+                },
             ),
             errors=errors,
         )

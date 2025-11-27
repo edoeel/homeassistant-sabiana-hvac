@@ -1,5 +1,4 @@
-"""
-Sabiana HVAC integration for Home Assistant.
+"""Sabiana HVAC integration for Home Assistant.
 
 This integration provides climate control for Sabiana HVAC systems.
 """
@@ -49,7 +48,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Successfully retrieved %d devices from Sabiana API", len(devices))
     except api.SabianaApiAuthError as err:
         _LOGGER.warning(
-            "Authentication failed for entry %s: %s", entry.entry_id, str(err)
+            "Authentication failed for entry %s: %s",
+            entry.entry_id,
+            str(err),
         )
     except api.SabianaApiClientError:
         _LOGGER.exception("API client error for entry %s", entry.entry_id)
@@ -66,7 +67,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "devices": devices,
         }
         _LOGGER.debug(
-            "Stored data for entry %s: %d devices", entry.entry_id, len(devices)
+            "Stored data for entry %s: %d devices",
+            entry.entry_id,
+            len(devices),
         )
 
         try:
@@ -99,7 +102,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         else:
             _LOGGER.warning(
-                "Failed to unload some platforms for entry %s", entry.entry_id
+                "Failed to unload some platforms for entry %s",
+                entry.entry_id,
             )
 
     except Exception:

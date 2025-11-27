@@ -1,5 +1,4 @@
-"""
-Climate entities for Sabiana HVAC systems.
+"""Climate entities for Sabiana HVAC systems.
 
 This module provides climate entities that represent Sabiana HVAC devices
 as Home Assistant climate entities with full climate control functionality.
@@ -67,8 +66,7 @@ async def async_setup_entry(
 
 
 class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
-    """
-    Climate entity for Sabiana HVAC devices.
+    """Climate entity for Sabiana HVAC devices.
 
     Provides climate control functionality for Sabiana HVAC systems,
     including temperature control, fan modes, swing modes, and presets.
@@ -109,8 +107,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         coordinator: SabianaTokenCoordinator,
         device: api.SabianaDevice,
     ) -> None:
-        """
-        Initialize the Sabiana HVAC climate entity.
+        """Initialize the Sabiana HVAC climate entity.
 
         Args:
             session: HTTP client session for API calls.
@@ -180,15 +177,14 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             _LOGGER.exception("Unexpected error while sending command to %s", self.name)
 
     async def async_added_to_hass(self) -> None:
-        """
-        Handle entity being added to Home Assistant.
+        """Handle entity being added to Home Assistant.
 
         Restores the last known state from Home Assistant.
         """
         await super().async_added_to_hass()
 
         self._coordinator_listener_unsub = self._coordinator.async_add_listener(
-            lambda: None
+            lambda: None,
         )
 
         if last_state := await self.async_get_last_state():
@@ -208,8 +204,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             self._coordinator_listener_unsub = None
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """
-        Set the HVAC mode.
+        """Set the HVAC mode.
 
         Args:
             hvac_mode: The HVAC mode to set.
@@ -218,9 +213,8 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         self._attr_hvac_mode = hvac_mode
         await self._async_execute_command()
 
-    async def async_set_temperature(self, **kwargs: Any) -> None:
-        """
-        Set the target temperature.
+    async def async_set_temperature(self, **kwargs: Any) -> None:  # noqa: ANN401
+        """Set the target temperature.
 
         Args:
             **kwargs: Keyword arguments containing temperature data.
@@ -233,8 +227,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             await self._async_execute_command()
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
-        """
-        Set the fan mode.
+        """Set the fan mode.
 
         Args:
             fan_mode: The fan mode to set.
@@ -247,8 +240,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             await self._async_execute_command()
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
-        """
-        Set the swing mode.
+        """Set the swing mode.
 
         Args:
             swing_mode: The swing mode to set.
@@ -261,8 +253,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             await self._async_execute_command()
 
     async def async_set_preset_mode(self, preset_mode: str | None) -> None:
-        """
-        Set the preset mode.
+        """Set the preset mode.
 
         Args:
             preset_mode: The preset mode to set, or None to clear.
