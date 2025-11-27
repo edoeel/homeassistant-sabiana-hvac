@@ -16,9 +16,10 @@ from .const import (
     CONF_LONG_JWT_EXPIRE_AT,
     CONF_SHORT_JWT,
     CONF_SHORT_JWT_EXPIRE_AT,
+    DEFAULT_POLL_INTERVAL,
     DOMAIN,
 )
-from .models import JWT
+from .models import JWT, SabianaDeviceState
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -176,3 +177,65 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
 
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
         self.data = short_jwt.token
+
+
+class SabianaDeviceCoordinator(
+    DataUpdateCoordinator[dict[str, SabianaDeviceState]]
+):
+    """Coordinator that polls Sabiana device states."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        session: httpx.AsyncClient,
+        token_coordinator: SabianaTokenCoordinator,
+        device_ids: list[str],
+    ) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_devices",
+            update_interval=timedelta(seconds=DEFAULT_POLL_INTERVAL),
+        )
+        self._session = session
+        self._token_coordinator = token_coordinator
+        self._device_ids = device_ids
+        self.data = {}
+
+    async def _async_update_data(self) -> dict[str, SabianaDeviceState]:
+        if not self._device_ids:
+            _LOGGER.debug("No Sabiana devices registered for polling")
+            return {}
+
+        await self._token_coordinator.async_request_refresh()
+        short_jwt = self._token_coordinator.data
+
+        try:
+            # Get devices which includes lastData with current state
+            response = await self._session.get(
+                f"{api.BASE_URL}/devices/getDeviceForUserV2",
+                headers=api.create_headers(short_jwt),
+            )
+            data = api.validate_response(response)
+            states = api.extract_device_states_from_devices(data)
+            
+            _LOGGER.debug("Polled status for %d devices", len(states))
+        except api.SabianaApiAuthError as err:
+            raise UpdateFailed(f"Authentication error while polling devices: {err}") from err
+        except api.SabianaApiClientError as err:
+            raise UpdateFailed(f"API error while polling devices: {err}") from err
+        except httpx.RequestError as err:
+            raise UpdateFailed(f"Connection error while polling devices: {err}") from err
+
+        # Filter to only return states for our tracked devices
+        filtered_states = {
+            device_id: state 
+            for device_id, state in states.items() 
+            if device_id in self._device_ids
+        }
+
+        missing = set(self._device_ids) - set(filtered_states)
+        if missing:
+            _LOGGER.debug("Did not receive state for devices: %s", missing)
+
+        return filtered_states
