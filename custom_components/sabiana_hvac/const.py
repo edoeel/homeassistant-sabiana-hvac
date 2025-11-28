@@ -17,12 +17,14 @@ from homeassistant.components.climate.const import (
 DOMAIN = "sabiana_hvac"
 
 BASE_URL = "https://be-standard.sabianawm.cloud"
+WEBSOCKET_URL = "https://be-flex.sabianawm.cloud"
 USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 11; IN2013) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/93.0.4577.82 Mobile Safari/537.36"
 )
 
-DEFAULT_POLL_INTERVAL = 10
+DEFAULT_POLL_INTERVAL = 30  # Increased since WebSocket provides real-time updates
+WEBSOCKET_RECONNECT_DELAY = 5  # Seconds to wait before reconnecting
 
 ERROR_INVALID_AUTH = "invalid_auth"
 ERROR_CANNOT_CONNECT = "cannot_connect"

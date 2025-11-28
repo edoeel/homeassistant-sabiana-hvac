@@ -118,6 +118,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         # Optimistic state handling: Track when we last sent a command
         # to prevent coordinator from immediately overwriting the UI
         self._last_command_time = 0.0
+        self._refresh_task: asyncio.Task[None] | None = None
         self._optimistic_update_duration = 10.0  # Keep optimistic state for 10 seconds
 
         # Configure entity features
@@ -217,7 +218,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
 
             # STEP 3: Schedule delayed refresh (5 seconds)
             # Give the device time to process before fetching new state
-            asyncio.create_task(self._async_delayed_refresh())
+            self._refresh_task = asyncio.create_task(self._async_delayed_refresh())
 
         except SabianaApiAuthError:
             _LOGGER.exception(
@@ -243,7 +244,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
     async def async_added_to_hass(self) -> None:
         """Handle entity being added to Home Assistant.
 
-        Restores the last known state from Home Assistant and subscribes to device updates.
+        Restores the last known state from HA and subscribes to device updates.
         """
         await super().async_added_to_hass()
 
@@ -253,7 +254,10 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         )
 
         # Try to get current state from coordinator first
-        if self._device_coordinator.data and self._device.id in self._device_coordinator.data:
+        if (
+            self._device_coordinator.data
+            and self._device.id in self._device_coordinator.data
+        ):
             self._update_from_coordinator()
         # Otherwise restore last known state if available
         elif last_state := await self.async_get_last_state():
@@ -294,48 +298,54 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             device_state.target_temperature
         )
 
-        # Check if we recently sent a command - if so, keep optimistic state for commanded values only
+        # Check if we recently sent a command - keep optimistic state
         time_since_command = time.monotonic() - self._last_command_time
         in_optimistic_window = time_since_command < self._optimistic_update_duration
 
         if in_optimistic_window:
-            # We're in the optimistic state window - update read-only values and allow external changes
-            _LOGGER.debug(
-                "In optimistic window for %s (%.1fs since command), allowing external changes",
-                self.name,
-                time_since_command
-            )
-            # Always update current temperature (read-only, measured value)
-            if device_state.current_temperature is not None:
-                self._attr_current_temperature = device_state.current_temperature
-
-            # CRITICAL: Allow fan_mode and preset_mode to update even during optimistic window
-            # These can be changed externally (from Sabiana app) and must sync
-            if device_state.fan_mode is not None:
-                old_fan = self._attr_fan_mode
-                self._attr_fan_mode = device_state.fan_mode
-                _LOGGER.info(
-                    "%s: Optimistic window - fan_mode from cloud: %s (was %s)",
-                    self.name,
-                    device_state.fan_mode,
-                    old_fan
-                )
-
-            if device_state.preset_mode is not None:
-                old_preset = self._attr_preset_mode
-                self._attr_preset_mode = device_state.preset_mode
-                _LOGGER.info(
-                    "%s: Optimistic window - preset_mode from cloud: %s (was %s)",
-                    self.name,
-                    device_state.preset_mode,
-                    old_preset
-                )
-
-            # Don't update target_temperature or hvac_mode during optimistic window
-            # (these were commanded by user and should stay optimistic)
+            self._update_optimistic_state(device_state, time_since_command)
             return
 
         # Past optimistic window - update all state from device
+        self._update_full_state(device_state)
+
+    def _update_optimistic_state(
+        self, device_state: api.SabianaDeviceState, time_since_command: float
+    ) -> None:
+        """Update state during optimistic window (after user command)."""
+        _LOGGER.debug(
+            "In optimistic window for %s (%.1fs since command)",
+            self.name,
+            time_since_command,
+        )
+        # Always update current temperature (read-only, measured value)
+        if device_state.current_temperature is not None:
+            self._attr_current_temperature = device_state.current_temperature
+
+        # Allow fan_mode and preset_mode to update during optimistic window
+        # These can be changed externally (from Sabiana app) and must sync
+        if device_state.fan_mode is not None:
+            old_fan = self._attr_fan_mode
+            self._attr_fan_mode = device_state.fan_mode
+            _LOGGER.info(
+                "%s: Optimistic window - fan_mode from cloud: %s (was %s)",
+                self.name,
+                device_state.fan_mode,
+                old_fan
+            )
+
+        if device_state.preset_mode is not None:
+            old_preset = self._attr_preset_mode
+            self._attr_preset_mode = device_state.preset_mode
+            _LOGGER.info(
+                "%s: Optimistic window - preset_mode from cloud: %s (was %s)",
+                self.name,
+                device_state.preset_mode,
+                old_preset
+            )
+
+    def _update_full_state(self, device_state: api.SabianaDeviceState) -> None:
+        """Update all entity state from device state (past optimistic window)."""
         if device_state.hvac_mode is not None:
             try:
                 self._attr_hvac_mode = HVACMode(device_state.hvac_mode)
@@ -351,7 +361,12 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         if device_state.fan_mode is not None:
             old_fan = self._attr_fan_mode
             self._attr_fan_mode = device_state.fan_mode
-            _LOGGER.debug("%s: Updated fan_mode from %s to %s", self.name, old_fan, device_state.fan_mode)
+            _LOGGER.debug(
+                "%s: Updated fan_mode from %s to %s",
+                self.name,
+                old_fan,
+                device_state.fan_mode,
+            )
 
         if device_state.swing_mode is not None:
             self._attr_swing_mode = device_state.swing_mode
@@ -359,7 +374,12 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         if device_state.preset_mode is not None:
             old_preset = self._attr_preset_mode
             self._attr_preset_mode = device_state.preset_mode
-            _LOGGER.debug("%s: Updated preset_mode from %s to %s", self.name, old_preset, device_state.preset_mode)
+            _LOGGER.debug(
+                "%s: Updated preset_mode from %s to %s",
+                self.name,
+                old_preset,
+                device_state.preset_mode,
+            )
 
         _LOGGER.debug("Updated %s from coordinator: %s", self.name, device_state)
 
@@ -372,8 +392,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             self._coordinator_listener_unsub = None
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """
-        Set the HVAC mode.
+        """Set the HVAC mode.
 
         Args:
             hvac_mode: The HVAC mode to set.
