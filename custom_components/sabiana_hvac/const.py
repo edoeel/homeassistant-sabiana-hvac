@@ -23,7 +23,7 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/93.0.4577.82 Mobile Safari/537.36"
 )
 
-DEFAULT_POLL_INTERVAL = 30  # Increased since WebSocket provides real-time updates
+DEFAULT_POLL_INTERVAL = 120  # Increased since WebSocket provides real-time updates
 WEBSOCKET_RECONNECT_DELAY = 5  # Seconds to wait before reconnecting
 
 ERROR_INVALID_AUTH = "invalid_auth"
