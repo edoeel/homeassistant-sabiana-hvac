@@ -1,6 +1,8 @@
 """Sabiana HVAC integration for Home Assistant.
 
 This integration provides climate control for Sabiana HVAC systems.
+It uses WebSocket connections for real-time device state updates,
+with REST API polling as a fallback.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from . import api
 from .api import create_session_client
 from .const import CONF_LONG_JWT, CONF_SHORT_JWT, DOMAIN
 from .coordinator import SabianaDeviceCoordinator, SabianaTokenCoordinator
+from .websocket import SabianaWebSocketManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,11 +64,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.exception("Unexpected error during setup for entry %s", entry.entry_id)
     else:
+        # Create WebSocket manager for real-time updates
+        websocket_manager = SabianaWebSocketManager(
+            hass,
+            lambda: coordinator.short_jwt.token,
+        )
+
+        # Try to connect to WebSocket (non-blocking, will reconnect if fails)
+        try:
+            connected = await websocket_manager.async_connect()
+            if connected:
+                _LOGGER.info(
+                    "Connected to Sabiana WebSocket for real-time updates"
+                )
+            else:
+                _LOGGER.warning(
+                    "Could not connect to Sabiana WebSocket, "
+                    "will use REST API polling with automatic reconnection attempts"
+                )
+        except Exception:
+            _LOGGER.exception(
+                "Error connecting to WebSocket, will use REST API polling"
+            )
+
         device_coordinator = SabianaDeviceCoordinator(
             hass,
             session,
             coordinator,
             [device.id for device in devices],
+            websocket_manager=websocket_manager,
         )
 
         await device_coordinator.async_config_entry_first_refresh()
@@ -74,6 +101,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "session": session,
             "token_coordinator": coordinator,
             "device_coordinator": device_coordinator,
+            "websocket_manager": websocket_manager,
             "devices": devices,
         }
         _LOGGER.debug(
@@ -105,8 +133,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if unload_ok:
             if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
                 stored_entry = hass.data[DOMAIN].pop(entry.entry_id)
+
+                # Disconnect WebSocket manager
+                if websocket_manager := stored_entry.get("websocket_manager"):
+                    await websocket_manager.async_disconnect()
+                    _LOGGER.debug("Disconnected WebSocket for entry %s", entry.entry_id)
+
+                # Shutdown device coordinator
                 if device_coordinator := stored_entry.get("device_coordinator"):
                     await device_coordinator.async_shutdown()
+
                 _LOGGER.debug("Cleaned up data for entry %s", entry.entry_id)
             _LOGGER.info(
                 "Successfully unloaded Sabiana HVAC integration for entry %s",
