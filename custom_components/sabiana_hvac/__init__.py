@@ -74,9 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             connected = await websocket_manager.async_connect()
             if connected:
-                _LOGGER.info(
-                    "Connected to Sabiana WebSocket for real-time updates"
-                )
+                _LOGGER.info("Connected to Sabiana WebSocket for real-time updates")
             else:
                 _LOGGER.warning(
                     "Could not connect to Sabiana WebSocket, "

@@ -352,8 +352,7 @@ def decode_last_data(hex_string: str) -> SabianaDeviceState:
 
         # Decode HVAC mode and power state
         hvac_mode, power_on = _decode_hvac_mode_and_power(
-            data[byte_hvac_mode],
-            data[byte_power_sleep]
+            data[byte_hvac_mode], data[byte_power_sleep]
         )
 
         # Decode fan mode (byte 4)
@@ -464,10 +463,10 @@ def _decode_hvac_mode_and_power(mode_byte: int, power_byte: int) -> tuple[str, b
     """
     # HVAC mode mapping (byte 5 lower nibble)
     hvac_mode_map = {
-        0x00: "cool",       # MODE_SUMMER
-        0x01: "heat",       # MODE_WINTER
+        0x00: "cool",  # MODE_SUMMER
+        0x01: "heat",  # MODE_WINTER
         0x02: "heat_cool",  # MODE_AUTO
-        0x03: "fan_only",   # MODE_FAN_ONLY
+        0x03: "fan_only",  # MODE_FAN_ONLY
     }
 
     mode_nibble = mode_byte & 0x0F
@@ -503,11 +502,11 @@ def _decode_fan_mode(fan_byte: int) -> str:
     fan_mode_map = {
         0x04: "auto",
         0x14: "low",
-        0x1C: "low",      # Alternate encoding
+        0x1C: "low",  # Alternate encoding
         0x3C: "medium",
-        0x4C: "medium",   # Alternate encoding
+        0x4C: "medium",  # Alternate encoding
         0x6E: "high",
-        0x7E: "high",     # Alternate encoding
+        0x7E: "high",  # Alternate encoding
     }
 
     fan_mode = fan_mode_map.get(fan_byte)
