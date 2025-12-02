@@ -183,9 +183,7 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         self.data = short_jwt.token
 
 
-class SabianaDeviceCoordinator(
-    DataUpdateCoordinator[dict[str, SabianaDeviceState]]
-):
+class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceState]]):
     """Coordinator that manages Sabiana device states.
 
     Uses WebSocket for real-time updates when connected, with REST API
@@ -270,14 +268,11 @@ class SabianaDeviceCoordinator(
 
         # Check if WebSocket is connected - if so, we can poll less frequently
         ws_connected = (
-            self._websocket_manager is not None
-            and self._websocket_manager.connected
+            self._websocket_manager is not None and self._websocket_manager.connected
         )
 
         if ws_connected:
-            _LOGGER.debug(
-                "WebSocket connected, REST poll as backup verification"
-            )
+            _LOGGER.debug("WebSocket connected, REST poll as backup verification")
 
         await self._token_coordinator.async_request_refresh()
         short_jwt = self._token_coordinator.data

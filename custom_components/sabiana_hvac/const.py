@@ -46,10 +46,10 @@ HVAC_MODE_MAP = {
 }
 HVAC_MODE_REVERSE_MAP = {value: key for key, value in HVAC_MODE_MAP.items()}
 FAN_MODE_MAP = {
-    FAN_LOW: "1",      # Command "1" -> State byte 7 upper nibble 0x0
-    FAN_MEDIUM: "2",   # Command "2" -> State byte 7 upper nibble 0x1
-    FAN_HIGH: "3",     # Command "3" -> State byte 7 upper nibble 0x3
-    FAN_AUTO: "4",     # Command "4" -> State byte 7 upper nibble 0x2
+    FAN_LOW: "1",  # Command "1" -> State byte 7 upper nibble 0x0
+    FAN_MEDIUM: "2",  # Command "2" -> State byte 7 upper nibble 0x1
+    FAN_HIGH: "3",  # Command "3" -> State byte 7 upper nibble 0x3
+    FAN_AUTO: "4",  # Command "4" -> State byte 7 upper nibble 0x2
 }
 FAN_MODE_REVERSE_MAP = {value: key for key, value in FAN_MODE_MAP.items()}
 SWING_MODE_MAP = {

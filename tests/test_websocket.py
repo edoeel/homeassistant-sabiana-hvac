@@ -155,9 +155,7 @@ class TestWebSocketManager:
             assert websocket_manager.connected is False
 
     @pytest.mark.asyncio
-    async def test_disconnect(
-        self, websocket_manager: SabianaWebSocketManager
-    ) -> None:
+    async def test_disconnect(self, websocket_manager: SabianaWebSocketManager) -> None:
         """Test WebSocket disconnection."""
         mock_sio = AsyncMock()
         mock_sio.disconnect = AsyncMock()

@@ -130,7 +130,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             self.name,
             self._attr_preset_mode,
             self._attr_preset_modes,
-            self._attr_supported_features
+            self._attr_supported_features,
         )
 
     def _configure_features(self) -> None:
@@ -295,7 +295,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             device_state.fan_mode,
             device_state.preset_mode,
             device_state.hvac_mode,
-            device_state.target_temperature
+            device_state.target_temperature,
         )
 
         # Check if we recently sent a command - keep optimistic state
@@ -331,7 +331,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
                 "%s: Optimistic window - fan_mode from cloud: %s (was %s)",
                 self.name,
                 device_state.fan_mode,
-                old_fan
+                old_fan,
             )
 
         if device_state.preset_mode is not None:
@@ -341,7 +341,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
                 "%s: Optimistic window - preset_mode from cloud: %s (was %s)",
                 self.name,
                 device_state.preset_mode,
-                old_preset
+                old_preset,
             )
 
     def _update_full_state(self, device_state: api.SabianaDeviceState) -> None:
