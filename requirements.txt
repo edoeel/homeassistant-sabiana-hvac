@@ -1,7 +1,7 @@
 colorlog==6.10.1
 homeassistant==2025.2.4
 pip>=21.3.1
-ruff==0.14.6
+ruff==0.14.8
 httpx>=0.24.0
 voluptuous>=0.13.0
 httpx-retries==0.4.5
