@@ -49,22 +49,12 @@ def mock_session() -> Mock:
 
 @pytest.fixture
 def mock_coordinator() -> Mock:
-    """Create a mock token coordinator."""
+    """Create a mock coordinator."""
     coordinator = Mock()
     coordinator.short_jwt = Mock()
     jwt_value = "test_jwt_token"
     coordinator.short_jwt.token = jwt_value
     coordinator.async_add_listener = Mock(return_value=Mock())
-    return coordinator
-
-
-@pytest.fixture
-def mock_device_coordinator() -> Mock:
-    """Create a mock device coordinator."""
-    coordinator = Mock()
-    coordinator.data = {}
-    coordinator.async_add_listener = Mock(return_value=Mock())
-    coordinator.async_request_refresh = AsyncMock()
     return coordinator
 
 
@@ -78,13 +68,10 @@ def mock_device() -> api.SabianaDevice:
 def entity(
     mock_session: Mock,
     mock_coordinator: Mock,
-    mock_device_coordinator: Mock,
     mock_device: api.SabianaDevice,
 ) -> SabianaHvacClimateEntity:
     """Create a Sabiana HVAC Climate entity for testing."""
-    return SabianaHvacClimateEntity(
-        mock_session, mock_coordinator, mock_device_coordinator, mock_device
-    )
+    return SabianaHvacClimateEntity(mock_session, mock_coordinator, mock_device)
 
 
 class TestAsyncSetupEntry:
@@ -96,7 +83,6 @@ class TestAsyncSetupEntry:
         mock_hass: Mock,
         mock_session: Mock,
         mock_coordinator: Mock,
-        mock_device_coordinator: Mock,
         mock_device: api.SabianaDevice,
     ) -> None:
         """Test that async_setup_entry creates entities for all devices."""
@@ -105,8 +91,7 @@ class TestAsyncSetupEntry:
         mock_hass.data["sabiana_hvac"] = {
             "test_entry": {
                 "session": mock_session,
-                "token_coordinator": mock_coordinator,
-                "device_coordinator": mock_device_coordinator,
+                "coordinator": mock_coordinator,
                 "devices": [mock_device],
             },
         }
@@ -127,36 +112,29 @@ class TestSabianaHvacClimateEntityInit:
         self,
         mock_session: Mock,
         mock_coordinator: Mock,
-        mock_device_coordinator: Mock,
         mock_device: api.SabianaDevice,
     ) -> None:
         """Test that init sets attributes correctly."""
-        entity = SabianaHvacClimateEntity(
-            mock_session, mock_coordinator, mock_device_coordinator, mock_device
-        )
+        entity = SabianaHvacClimateEntity(mock_session, mock_coordinator, mock_device)
         assert entity._session == mock_session
         assert entity._coordinator == mock_coordinator
-        assert entity._device_coordinator == mock_device_coordinator
         assert entity._device == mock_device
         assert entity.unique_id == "device1"
         assert entity.name == "Test Device"
         assert entity.hvac_mode == HVACMode.OFF
         assert entity.target_temperature == DEFAULT_TARGET_TEMP
         assert entity.fan_mode == FAN_AUTO
-        assert entity.swing_mode == "off"
-        assert entity.preset_mode == PRESET_NONE
+        assert entity.swing_mode == "Swing"
+        assert entity.preset_mode is None
 
     def test_init_sets_class_attributes(
         self,
         mock_session: Mock,
         mock_coordinator: Mock,
-        mock_device_coordinator: Mock,
         mock_device: api.SabianaDevice,
     ) -> None:
         """Test that init sets class attributes correctly."""
-        entity = SabianaHvacClimateEntity(
-            mock_session, mock_coordinator, mock_device_coordinator, mock_device
-        )
+        entity = SabianaHvacClimateEntity(mock_session, mock_coordinator, mock_device)
         assert HVACMode.OFF in entity.hvac_modes
         assert HVACMode.COOL in entity.hvac_modes
         assert HVACMode.HEAT in entity.hvac_modes
@@ -165,8 +143,10 @@ class TestSabianaHvacClimateEntityInit:
         assert FAN_MEDIUM in entity.fan_modes
         assert FAN_HIGH in entity.fan_modes
         assert FAN_AUTO in entity.fan_modes
-        # Swing modes are now empty (not supported)
-        assert entity.swing_modes == []
+        assert "Vertical" in entity.swing_modes
+        assert "Horizontal" in entity.swing_modes
+        assert "45 Degrees" in entity.swing_modes
+        assert "Swing" in entity.swing_modes
         assert PRESET_SLEEP in entity.preset_modes
         assert PRESET_NONE in entity.preset_modes
         assert entity.temperature_unit == UnitOfTemperature.CELSIUS
@@ -403,13 +383,13 @@ class TestSabianaHvacClimateEntityAsyncAddedToHass:
     async def test_async_added_to_hass_registers_listener(
         self,
         entity: SabianaHvacClimateEntity,
-        mock_device_coordinator: Mock,
+        mock_coordinator: Mock,
     ) -> None:
         """Test that async_added_to_hass registers listener."""
         entity.async_get_last_state = AsyncMock(return_value=None)
         with patch.object(entity, "async_get_last_state", return_value=None):
             await entity.async_added_to_hass()
-            mock_device_coordinator.async_add_listener.assert_called_once()
+            mock_coordinator.async_add_listener.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_async_added_to_hass_restores_state_when_available(

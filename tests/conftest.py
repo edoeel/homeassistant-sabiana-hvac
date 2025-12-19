@@ -2,23 +2,9 @@
 
 import base64
 import json
-from collections.abc import Generator
 from datetime import UTC, datetime
-from typing import Any
-from unittest.mock import patch
 
 import pytest
-
-
-@pytest.fixture(autouse=True)
-def mock_frame_helper() -> Generator[None, Any, Any]:
-    """Mock the frame helper for all tests.
-
-    This prevents the 'Frame helper not set up' RuntimeError when
-    instantiating DataUpdateCoordinator objects in tests.
-    """
-    with patch("homeassistant.helpers.frame.report_usage"):
-        yield
 
 
 def create_test_jwt(exp_timestamp: int | None = None) -> str:

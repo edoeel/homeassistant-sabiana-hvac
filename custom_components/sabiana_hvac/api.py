@@ -299,8 +299,6 @@ def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
 def decode_last_data(hex_string: str) -> SabianaDeviceState:
     """Decode the lastData hex string into a SabianaDeviceState.
 
-    Based on the official Sabiana Android app decoder (androidAppJs.js line 640-790).
-
     Byte Structure:
         Bytes 1-2:  Controller model (hex)
         Byte 4:     Fan mode
@@ -358,7 +356,7 @@ def decode_last_data(hex_string: str) -> SabianaDeviceState:
         # Decode fan mode (byte 4)
         fan_mode = _decode_fan_mode(data[byte_fan_mode])
 
-        # Decode sleep/preset mode (byte 7 upper nibble)
+        # Decode sleep/preset mode from status flags
         preset_mode = _decode_preset_mode(data[byte_power_sleep])
 
         # Decode swing mode (byte 6 bit 0)
@@ -519,10 +517,7 @@ def _decode_fan_mode(fan_byte: int) -> str:
 
 
 def _decode_preset_mode(power_sleep_byte: int) -> str:
-    """Decode preset/sleep mode from byte 7 upper nibble.
-
-    Sleep mode is indicated when byte 7 upper nibble = 0xE.
-    This works for ANY fan mode (auto, low, medium, high).
+    """Decode preset/sleep mode from device status flags.
 
     Args:
         power_sleep_byte: Byte 7 value.
@@ -531,11 +526,10 @@ def _decode_preset_mode(power_sleep_byte: int) -> str:
         Preset mode string ("sleep" or "none").
 
     """
-    sleep_mode_indicator = 0xE
+    if power_sleep_byte & 0x80:
+        return "sleep"
 
-    upper_nibble = (power_sleep_byte & 0xF0) >> 4
-
-    return "sleep" if upper_nibble == sleep_mode_indicator else "none"
+    return "none"
 
 
 def extract_device_states_from_devices(
