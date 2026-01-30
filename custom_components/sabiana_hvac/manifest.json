@@ -12,5 +12,5 @@
     "voluptuous>=0.13.0",
     "httpx-retries==0.2.0"
   ],
-  "version": "0.0.13"
+  "version": "0.0.14"
 }
