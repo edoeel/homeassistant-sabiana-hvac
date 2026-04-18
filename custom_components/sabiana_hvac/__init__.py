@@ -68,6 +68,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_manager = SabianaWebSocketManager(
             hass,
             lambda: coordinator.short_jwt.token,
+            refresh_token=coordinator.async_request_refresh,
         )
 
         # Try to connect to WebSocket (non-blocking, will reconnect if fails)

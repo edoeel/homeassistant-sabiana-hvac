@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any
 import socketio
 
 from .api import decode_last_data
-from .const import WEBSOCKET_RECONNECT_DELAY, WEBSOCKET_URL
+from .const import (
+    WEBSOCKET_MAX_RECONNECT_DELAY,
+    WEBSOCKET_RECONNECT_DELAY,
+    WEBSOCKET_URL,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -61,20 +65,25 @@ class SabianaWebSocketManager:
         self,
         hass: HomeAssistant,
         get_token: Callable[[], str],
+        refresh_token: Callable[[], Any] | None = None,
     ) -> None:
         """Initialize the WebSocket manager.
 
         Args:
             hass: Home Assistant instance.
             get_token: Callback function to get the current JWT token.
+            refresh_token: Optional async callback to refresh the JWT token
+                before reconnection attempts.
 
         """
         self._hass = hass
         self._get_token = get_token
+        self._refresh_token = refresh_token
         self._sio: socketio.AsyncClient | None = None
         self._connected = False
         self._reconnect_task: asyncio.Task[None] | None = None
         self._shutdown = False
+        self._reconnect_delay = WEBSOCKET_RECONNECT_DELAY
 
         # Callbacks for different event types
         self._device_update_callbacks: list[
@@ -84,6 +93,7 @@ class SabianaWebSocketManager:
             Callable[[WebSocketConnectionEvent], None]
         ] = []
         self._refresh_callbacks: list[Callable[[], None]] = []
+        self._connection_status_callbacks: list[Callable[[bool], None]] = []
 
     @property
     def connected(self) -> bool:
@@ -153,8 +163,32 @@ class SabianaWebSocketManager:
 
         return unregister
 
+    def register_connection_status_callback(
+        self,
+        callback: Callable[[bool], None],
+    ) -> Callable[[], None]:
+        """Register a callback for WebSocket connection status changes.
+
+        Args:
+            callback: Function called with True on connect, False on disconnect.
+
+        Returns:
+            A function to unregister the callback.
+
+        """
+        self._connection_status_callbacks.append(callback)
+
+        def unregister() -> None:
+            if callback in self._connection_status_callbacks:
+                self._connection_status_callbacks.remove(callback)
+
+        return unregister
+
     async def async_connect(self) -> bool:
         """Connect to the Sabiana WebSocket server.
+
+        Refreshes the JWT token before connecting to ensure it's valid,
+        especially important for reconnection attempts after long disconnections.
 
         Returns:
             True if connection was successful, False otherwise.
@@ -165,10 +199,28 @@ class SabianaWebSocketManager:
             return True
 
         try:
+            # Refresh token before connecting (critical for reconnections).
+            # HA's async_request_refresh() swallows most exceptions internally,
+            # but we guard against unexpected errors to be safe.
+            if self._refresh_token is not None:
+                try:
+                    await self._refresh_token()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "Failed to refresh token before WebSocket connect, "
+                        "using existing token"
+                    )
+
             token = self._get_token()
             if not token:
                 _LOGGER.error("Cannot connect to WebSocket: no JWT token available")
                 return False
+
+            # Clean up previous client if it exists
+            if self._sio is not None:
+                with contextlib.suppress(Exception):
+                    await self._sio.disconnect()
+                self._sio = None
 
             self._sio = socketio.AsyncClient(
                 reconnection=False,  # We handle reconnection ourselves
@@ -179,7 +231,7 @@ class SabianaWebSocketManager:
             # Register event handlers
             self._register_event_handlers()
 
-            _LOGGER.info("Connecting to Sabiana WebSocket at %s", WEBSOCKET_URL)
+            _LOGGER.debug("Connecting to Sabiana WebSocket at %s", WEBSOCKET_URL)
 
             await self._sio.connect(
                 WEBSOCKET_URL,
@@ -188,7 +240,9 @@ class SabianaWebSocketManager:
             )
 
             self._connected = True
+            self._reconnect_delay = WEBSOCKET_RECONNECT_DELAY  # Reset backoff
             _LOGGER.info("Successfully connected to Sabiana WebSocket")
+            self._notify_connection_status(connected=True)
 
         except socketio.exceptions.ConnectionError as err:
             _LOGGER.warning("Failed to connect to Sabiana WebSocket: %s", err)
@@ -198,6 +252,14 @@ class SabianaWebSocketManager:
             self._connected = False
 
         return self._connected
+
+    def _notify_connection_status(self, *, connected: bool) -> None:
+        """Notify registered callbacks about connection status changes."""
+        for callback in self._connection_status_callbacks:
+            try:
+                callback(connected=connected)
+            except Exception:
+                _LOGGER.exception("Error in connection status callback")
 
     def _register_event_handlers(self) -> None:
         """Register Socket.IO event handlers."""
@@ -211,11 +273,12 @@ class SabianaWebSocketManager:
             self._connected = True
 
         @self._sio.event
-        async def disconnect() -> None:
+        async def disconnect(reason) -> None:
             """Handle disconnection."""
-            _LOGGER.warning("Sabiana WebSocket disconnected")
+            _LOGGER.debug("Sabiana WebSocket disconnected (reason: %s)", reason)
             self._connected = False
-            # Schedule reconnection
+            self._notify_connection_status(connected=False)
+            # Schedule reconnection with backoff
             if not self._shutdown:
                 self._schedule_reconnect()
 
@@ -318,17 +381,48 @@ class SabianaWebSocketManager:
                 _LOGGER.exception("Error in connection event callback")
 
     def _schedule_reconnect(self) -> None:
-        """Schedule a reconnection attempt."""
+        """Schedule a reconnection attempt with exponential backoff."""
         if self._reconnect_task is not None and not self._reconnect_task.done():
             return  # Reconnection already scheduled
 
         async def reconnect() -> None:
-            await asyncio.sleep(WEBSOCKET_RECONNECT_DELAY)
-            if not self._shutdown:
-                _LOGGER.info("Attempting to reconnect to Sabiana WebSocket...")
-                await self.async_connect()
+            while not self._shutdown:
+                delay = self._reconnect_delay
+                _LOGGER.info(
+                    "Attempting to reconnect to Sabiana WebSocket in %ds...",
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+                if self._shutdown:
+                    break
+
+                connected = await self.async_connect()
+                if connected:
+                    _LOGGER.info("Successfully reconnected to Sabiana WebSocket")
+                    return
+
+                # Reconnection failed — trigger REST poll so state doesn't go stale
+                self._trigger_refresh_callbacks()
+
+                # Exponential backoff: double the delay, cap at max
+                self._reconnect_delay = min(
+                    self._reconnect_delay * 2, WEBSOCKET_MAX_RECONNECT_DELAY
+                )
+                _LOGGER.warning(
+                    "Reconnection failed, next attempt in %ds",
+                    self._reconnect_delay,
+                )
 
         self._reconnect_task = asyncio.create_task(reconnect())
+
+    def _trigger_refresh_callbacks(self) -> None:
+        """Trigger refresh callbacks to ensure REST polling gets fresh data."""
+        for callback in self._refresh_callbacks:
+            try:
+                callback()
+            except Exception:
+                _LOGGER.exception("Error in refresh callback during reconnection")
 
     async def async_disconnect(self) -> None:
         """Disconnect from the WebSocket server."""

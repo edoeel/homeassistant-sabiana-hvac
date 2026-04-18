@@ -460,10 +460,11 @@ def _decode_hvac_mode_and_power(mode_byte: int, power_byte: int) -> tuple[str, b
 
     """
     # HVAC mode mapping (byte 5 lower nibble)
+    # Must match HVAC_MODE_MAP in const.py: COOL=0, HEAT=1, DRY=2, FAN_ONLY=3
     hvac_mode_map = {
         0x00: "cool",  # MODE_SUMMER
         0x01: "heat",  # MODE_WINTER
-        0x02: "heat_cool",  # MODE_AUTO
+        0x02: "dry",  # MODE_DRY (was incorrectly mapped to "heat_cool")
         0x03: "fan_only",  # MODE_FAN_ONLY
     }
 
@@ -490,6 +491,9 @@ def _decode_fan_mode(fan_byte: int) -> str:
     - 0x3C: MEDIUM
     - 0x6E: HIGH
 
+    Some controller models use different byte values. We use both exact
+    matching and range-based fallback to handle unknown devices gracefully.
+
     Args:
         fan_byte: Byte 4 value.
 
@@ -497,7 +501,12 @@ def _decode_fan_mode(fan_byte: int) -> str:
         Fan mode string (low, medium, high, auto).
 
     """
+    # Exact mappings (verified from device testing across multiple models)
     fan_mode_map = {
+        0x00: "auto",
+        0x01: "low",  # Reported by some controller models
+        0x02: "medium",  # Reported by some controller models
+        0x03: "high",  # Reported by some controller models
         0x04: "auto",
         0x14: "low",
         0x1C: "low",  # Alternate encoding
@@ -509,11 +518,29 @@ def _decode_fan_mode(fan_byte: int) -> str:
 
     fan_mode = fan_mode_map.get(fan_byte)
 
-    if fan_mode is None:
-        _LOGGER.warning("Unknown fan mode byte: 0x%02X, defaulting to auto", fan_byte)
-        return "auto"
+    if fan_mode is not None:
+        return fan_mode
 
-    return fan_mode
+    # Range-based fallback for unknown byte values
+    # This prevents silent defaulting to "auto" which causes UI revert bugs
+    _LOGGER.warning(
+        "Unknown fan mode byte: 0x%02X. Please report this value to the "
+        "integration developers. Using range-based fallback.",
+        fan_byte,
+    )
+
+    # Fan byte range thresholds for fallback classification
+    fan_auto_threshold = 0x08
+    fan_low_threshold = 0x28
+    fan_medium_threshold = 0x50
+
+    if fan_byte <= fan_auto_threshold:
+        return "auto"
+    if fan_byte <= fan_low_threshold:
+        return "low"
+    if fan_byte <= fan_medium_threshold:
+        return "medium"
+    return "high"
 
 
 def _decode_preset_mode(power_sleep_byte: int) -> str:

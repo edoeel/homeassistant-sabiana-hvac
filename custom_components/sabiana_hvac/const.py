@@ -23,8 +23,10 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/93.0.4577.82 Mobile Safari/537.36"
 )
 
-DEFAULT_POLL_INTERVAL = 120  # Increased since WebSocket provides real-time updates
-WEBSOCKET_RECONNECT_DELAY = 5  # Seconds to wait before reconnecting
+DEFAULT_POLL_INTERVAL = 120  # Fallback when WebSocket is disconnected
+WS_CONNECTED_POLL_INTERVAL = 1800  # 30 minutes when WebSocket handles real-time
+WEBSOCKET_RECONNECT_DELAY = 5  # Initial seconds to wait before reconnecting
+WEBSOCKET_MAX_RECONNECT_DELAY = 300  # Max 5 minutes between reconnect attempts
 
 ERROR_INVALID_AUTH = "invalid_auth"
 ERROR_CANNOT_CONNECT = "cannot_connect"
