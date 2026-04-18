@@ -18,6 +18,7 @@ from .const import (
     CONF_SHORT_JWT_EXPIRE_AT,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
+    WS_CONNECTED_POLL_INTERVAL,
 )
 from .models import JWT, SabianaDeviceState
 
@@ -76,17 +77,27 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         )
 
     async def _async_update_data(self) -> str:
-        """Check token expiration and refresh if needed."""
-        now = datetime.now(UTC)
+        """Check token expiration and refresh if needed.
 
-        if now >= self.long_jwt.expire_at:
-            _LOGGER.warning("Long JWT expired, performing full re-authentication")
+        Uses a safety margin to refresh tokens before they actually expire,
+        preventing race conditions where commands fail with auth errors
+        between coordinator refresh cycles.
+        """
+        now = datetime.now(UTC)
+        token_refresh_margin = timedelta(minutes=5)
+
+        if now >= (self.long_jwt.expire_at - token_refresh_margin):
+            _LOGGER.warning(
+                "Long JWT expired or expiring soon, performing full re-authentication"
+            )
             short_jwt, long_jwt = await self._async_reauth()
             self._update_tokens(short_jwt, long_jwt)
             return short_jwt.token
 
-        if now >= self.short_jwt.expire_at:
-            _LOGGER.debug("Short JWT expired, refreshing using long JWT")
+        if now >= (self.short_jwt.expire_at - token_refresh_margin):
+            _LOGGER.debug(
+                "Short JWT expired or expiring soon, refreshing using long JWT"
+            )
             try:
                 new_short_jwt = await api.async_renew_jwt(
                     self.session,
@@ -209,17 +220,24 @@ class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceStat
             websocket_manager: Optional WebSocket manager for real-time updates.
 
         """
+        # Determine initial poll interval based on WebSocket state
+        ws_connected = websocket_manager is not None and websocket_manager.connected
+        initial_interval = (
+            WS_CONNECTED_POLL_INTERVAL if ws_connected else DEFAULT_POLL_INTERVAL
+        )
+
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_devices",
-            update_interval=timedelta(seconds=DEFAULT_POLL_INTERVAL),
+            update_interval=timedelta(seconds=initial_interval),
         )
         self._session = session
         self._token_coordinator = token_coordinator
         self._device_ids = device_ids
         self._websocket_manager = websocket_manager
         self._unregister_ws_callback: Callable[[], None] | None = None
+        self._unregister_ws_status_callback: Callable[[], None] | None = None
         self.data = {}
 
         # Register for WebSocket updates if manager is available
@@ -256,6 +274,29 @@ class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceStat
             self.hass.async_create_task(self.async_request_refresh())
 
         self._websocket_manager.register_refresh_callback(on_refresh_request)
+
+        # Register for connection status changes to adjust poll interval
+        def on_connection_status(*, connected: bool) -> None:
+            """Adjust poll interval based on WebSocket connection status."""
+            if connected:
+                new_interval = WS_CONNECTED_POLL_INTERVAL
+                _LOGGER.info(
+                    "WebSocket connected, increasing REST poll interval to %ds",
+                    new_interval,
+                )
+            else:
+                new_interval = DEFAULT_POLL_INTERVAL
+                _LOGGER.info(
+                    "WebSocket disconnected, reducing REST poll interval to %ds",
+                    new_interval,
+                )
+            self.update_interval = timedelta(seconds=new_interval)
+
+        self._unregister_ws_status_callback = (
+            self._websocket_manager.register_connection_status_callback(
+                on_connection_status
+            )
+        )
 
     async def _async_update_data(self) -> dict[str, SabianaDeviceState]:
         """Fetch device states from the API.
@@ -316,5 +357,9 @@ class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceStat
         if self._unregister_ws_callback is not None:
             self._unregister_ws_callback()
             self._unregister_ws_callback = None
+
+        if self._unregister_ws_status_callback is not None:
+            self._unregister_ws_status_callback()
+            self._unregister_ws_status_callback = None
 
         await super().async_shutdown()

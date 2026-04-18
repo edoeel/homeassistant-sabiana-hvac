@@ -124,8 +124,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         # Configure entity features
         self._configure_features()
 
-        # Debug logging to verify preset mode configuration
-        _LOGGER.info(
+        _LOGGER.debug(
             "Initialized %s with preset_mode=%s, preset_modes=%s, features=%s",
             self.name,
             self._attr_preset_mode,
@@ -196,15 +195,16 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         return f"0{fan}0{mode}{temperature}0{swing}01FFFF000{preset}"
 
     async def _async_execute_command(self) -> None:
-        """Execute command with optimistic state update."""
+        """Execute command with token refresh and retry on auth error."""
         command_payload = self._build_command_payload()
 
-        try:
-            # STEP 1: Mark command time for optimistic state handling
-            # This prevents coordinator from overwriting our commanded value immediately
-            self._last_command_time = time.monotonic()
+        # Mark command time for optimistic state handling
+        self._last_command_time = time.monotonic()
 
-            # Send the command to the device
+        try:
+            # Ensure token is fresh before sending
+            await self._coordinator.async_request_refresh()
+
             await api.async_send_command(
                 self._session,
                 self._coordinator.short_jwt.token,
@@ -212,29 +212,47 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
                 command_payload,
             )
 
-            # STEP 2: Update state immediately (optimistic)
-            # The UI will show the new value right away
             self.async_write_ha_state()
-
-            # STEP 3: Schedule delayed refresh (5 seconds)
-            # Give the device time to process before fetching new state
             self._refresh_task = asyncio.create_task(self._async_delayed_refresh())
 
         except SabianaApiAuthError:
-            _LOGGER.exception(
-                "Authentication error for %s. Please re-configure the integration.",
-                self.name,
+            # Token might have expired mid-flight — force refresh and retry once
+            _LOGGER.debug(
+                "Auth error for %s, refreshing token and retrying once", self.name
             )
-            self._last_command_time = 0.0  # Reset on error
+            await self._async_retry_command(command_payload)
         except SabianaApiClientError:
             _LOGGER.exception("API error while sending command to %s", self.name)
-            self._last_command_time = 0.0  # Reset on error
+            self._last_command_time = 0.0
         except httpx.RequestError:
             _LOGGER.exception("Connection error while sending command to %s", self.name)
-            self._last_command_time = 0.0  # Reset on error
-        except Exception:
-            _LOGGER.exception("Unexpected error while sending command to %s", self.name)
-            self._last_command_time = 0.0  # Reset on error
+            self._last_command_time = 0.0
+
+    async def _async_retry_command(self, command_payload: str) -> None:
+        """Retry a command after refreshing the token. Called on auth error."""
+        try:
+            await self._coordinator.async_request_refresh()
+            await api.async_send_command(
+                self._session,
+                self._coordinator.short_jwt.token,
+                self._device.id,
+                command_payload,
+            )
+            self.async_write_ha_state()
+            self._refresh_task = asyncio.create_task(self._async_delayed_refresh())
+            _LOGGER.debug("Retry succeeded for %s after token refresh", self.name)
+        except SabianaApiAuthError:
+            _LOGGER.exception(
+                "Authentication error for %s after retry. "
+                "Please re-configure the integration.",
+                self.name,
+            )
+            self._last_command_time = 0.0
+        except (SabianaApiClientError, httpx.RequestError):
+            _LOGGER.exception(
+                "Error sending command to %s on retry", self.name
+            )
+            self._last_command_time = 0.0
 
     async def _async_delayed_refresh(self) -> None:
         """Request coordinator refresh after a delay to allow device processing."""
@@ -312,37 +330,26 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
     def _update_optimistic_state(
         self, device_state: api.SabianaDeviceState, time_since_command: float
     ) -> None:
-        """Update state during optimistic window (after user command)."""
+        """Update state during optimistic window (after user command).
+
+        During the optimistic window, we only update read-only values
+        (current_temperature) and preserve all user-commanded values.
+        The device hasn't processed the command yet, so coordinator data
+        still contains the OLD state which would revert the UI.
+        """
         _LOGGER.debug(
-            "In optimistic window for %s (%.1fs since command)",
+            "In optimistic window for %s (%.1fs since command), "
+            "keeping user-commanded values",
             self.name,
             time_since_command,
         )
-        # Always update current temperature (read-only, measured value)
+        # Only update current temperature (read-only, measured by sensor)
         if device_state.current_temperature is not None:
             self._attr_current_temperature = device_state.current_temperature
 
-        # Allow fan_mode and preset_mode to update during optimistic window
-        # These can be changed externally (from Sabiana app) and must sync
-        if device_state.fan_mode is not None:
-            old_fan = self._attr_fan_mode
-            self._attr_fan_mode = device_state.fan_mode
-            _LOGGER.info(
-                "%s: Optimistic window - fan_mode from cloud: %s (was %s)",
-                self.name,
-                device_state.fan_mode,
-                old_fan,
-            )
-
-        if device_state.preset_mode is not None:
-            old_preset = self._attr_preset_mode
-            self._attr_preset_mode = device_state.preset_mode
-            _LOGGER.info(
-                "%s: Optimistic window - preset_mode from cloud: %s (was %s)",
-                self.name,
-                device_state.preset_mode,
-                old_preset,
-            )
+        # Do NOT update fan_mode, preset_mode, hvac_mode, target_temperature
+        # during the optimistic window. The device hasn't processed our command
+        # yet, so coordinator data contains stale values that would revert the UI.
 
     def _update_full_state(self, device_state: api.SabianaDeviceState) -> None:
         """Update all entity state from device state (past optimistic window)."""
