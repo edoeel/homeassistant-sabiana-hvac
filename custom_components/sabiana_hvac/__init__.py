@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 from . import api
 from .api import create_session_client
 from .const import CONF_LONG_JWT, CONF_SHORT_JWT, DOMAIN
-from .coordinator import SabianaTokenCoordinator
+from .coordinator import SabianaDeviceCoordinator, SabianaTokenCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,9 +61,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.exception("Unexpected error during setup for entry %s", entry.entry_id)
     else:
+        device_coordinator = SabianaDeviceCoordinator(hass, session, coordinator)
+        await device_coordinator.async_config_entry_first_refresh()
+
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
             "session": session,
             "coordinator": coordinator,
+            "device_coordinator": device_coordinator,
             "devices": devices,
         }
         _LOGGER.debug(

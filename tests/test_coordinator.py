@@ -18,7 +18,10 @@ from custom_components.sabiana_hvac.const import (
     CONF_SHORT_JWT,
     CONF_SHORT_JWT_EXPIRE_AT,
 )
-from custom_components.sabiana_hvac.coordinator import SabianaTokenCoordinator
+from custom_components.sabiana_hvac.coordinator import (
+    SabianaDeviceCoordinator,
+    SabianaTokenCoordinator,
+)
 from custom_components.sabiana_hvac.models import JWT
 
 NEW_SHORT_JWT_VALUE = "new_short"
@@ -554,3 +557,150 @@ class TestSabianaTokenCoordinatorUpdateTokens:
         coordinator._update_tokens(new_short_jwt)
         call_args = mock_hass.config_entries.async_update_entry.call_args
         assert call_args[1]["data"][CONF_EMAIL] == original_email
+
+
+class TestSabianaDeviceCoordinator:
+    """Tests for SabianaDeviceCoordinator."""
+
+    @pytest.fixture
+    def token_coordinator(
+        self,
+        mock_hass: Mock,
+        mock_session: Mock,
+        mock_config_entry: Mock,
+    ) -> SabianaTokenCoordinator:
+        """Real token coordinator, fed with valid tokens from fixtures."""
+        return SabianaTokenCoordinator(mock_hass, mock_session, mock_config_entry)
+
+    def test_init_uses_device_state_poll_interval(
+        self,
+        mock_hass: Mock,
+        mock_session: Mock,
+        token_coordinator: SabianaTokenCoordinator,
+    ) -> None:
+        """Coordinator polls every DEVICE_STATE_POLL_INTERVAL_SECONDS."""
+        from custom_components.sabiana_hvac.const import (
+            DEVICE_STATE_POLL_INTERVAL_SECONDS,
+        )
+
+        coordinator = SabianaDeviceCoordinator(
+            mock_hass,
+            mock_session,
+            token_coordinator,
+        )
+        assert coordinator.update_interval == timedelta(
+            seconds=DEVICE_STATE_POLL_INTERVAL_SECONDS,
+        )
+
+    @pytest.mark.asyncio
+    async def test_async_update_data_returns_device_states(
+        self,
+        mock_hass: Mock,
+        mock_session: Mock,
+        token_coordinator: SabianaTokenCoordinator,
+    ) -> None:
+        """Happy path: fetched states are returned unchanged."""
+        fake_state = api.DeviceState(
+            is_on=True,
+            mode="cooling",
+            heating_temp=20.0,
+            cooling_temp=22.0,
+            current_temp=23.5,
+            fan_speed=1,
+            fan_auto=False,
+            night_mode=False,
+        )
+        with patch(
+            "custom_components.sabiana_hvac.coordinator.api.async_get_device_states",
+            AsyncMock(return_value={"device1": fake_state}),
+        ):
+            coordinator = SabianaDeviceCoordinator(
+                mock_hass,
+                mock_session,
+                token_coordinator,
+            )
+            result = await coordinator._async_update_data()
+            assert result == {"device1": fake_state}
+
+    @pytest.mark.asyncio
+    async def test_async_update_data_retries_after_auth_error(
+        self,
+        mock_hass: Mock,
+        mock_session: Mock,
+        token_coordinator: SabianaTokenCoordinator,
+    ) -> None:
+        """On auth error the coordinator refreshes the JWT then retries once."""
+        fake_state = api.DeviceState(
+            is_on=False,
+            mode="fan",
+            heating_temp=20.0,
+            cooling_temp=22.0,
+            current_temp=23.5,
+            fan_speed=0,
+            fan_auto=True,
+            night_mode=False,
+        )
+        calls = [
+            api.SabianaApiAuthError("expired"),
+            {"device1": fake_state},
+        ]
+
+        async def _side_effect(*_args: object, **_kwargs: object) -> dict:
+            result = calls.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        token_coordinator.async_request_refresh = AsyncMock()
+        with patch(
+            "custom_components.sabiana_hvac.coordinator.api.async_get_device_states",
+            side_effect=_side_effect,
+        ):
+            coordinator = SabianaDeviceCoordinator(
+                mock_hass,
+                mock_session,
+                token_coordinator,
+            )
+            result = await coordinator._async_update_data()
+            assert result == {"device1": fake_state}
+            token_coordinator.async_request_refresh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_async_update_data_raises_update_failed_on_client_error(
+        self,
+        mock_hass: Mock,
+        mock_session: Mock,
+        token_coordinator: SabianaTokenCoordinator,
+    ) -> None:
+        """A non-auth API error becomes UpdateFailed."""
+        with patch(
+            "custom_components.sabiana_hvac.coordinator.api.async_get_device_states",
+            side_effect=api.SabianaApiClientError("boom"),
+        ):
+            coordinator = SabianaDeviceCoordinator(
+                mock_hass,
+                mock_session,
+                token_coordinator,
+            )
+            with pytest.raises(UpdateFailed, match="boom"):
+                await coordinator._async_update_data()
+
+    @pytest.mark.asyncio
+    async def test_async_update_data_raises_update_failed_on_request_error(
+        self,
+        mock_hass: Mock,
+        mock_session: Mock,
+        token_coordinator: SabianaTokenCoordinator,
+    ) -> None:
+        """Network errors become UpdateFailed."""
+        with patch(
+            "custom_components.sabiana_hvac.coordinator.api.async_get_device_states",
+            side_effect=httpx.RequestError("conn"),
+        ):
+            coordinator = SabianaDeviceCoordinator(
+                mock_hass,
+                mock_session,
+                token_coordinator,
+            )
+            with pytest.raises(UpdateFailed, match="conn"):
+                await coordinator._async_update_data()

@@ -48,6 +48,37 @@ class SabianaDevice:
     name: str
 
 
+@dataclass(frozen=True)
+class DeviceState:
+    """Runtime state parsed from a device's ``lastData`` payload.
+
+    Attributes:
+        is_on: Whether the unit is powered on.
+        mode: Active operating mode: ``"cooling"``, ``"heating"``, or ``"fan"``.
+        heating_temp: Heating setpoint in Celsius.
+        cooling_temp: Cooling setpoint in Celsius.
+        current_temp: Temperature currently measured by the device.
+        fan_speed: Fan speed bucket (``0``=auto, ``1``=low, ``5``=medium,
+            ``10``=high) as used by the Sabiana mobile app.
+        fan_auto: True when the fan is in automatic mode.
+        night_mode: True when the sleep/night preset is active.
+
+    """
+
+    is_on: bool
+    mode: str
+    heating_temp: float
+    cooling_temp: float
+    current_temp: float
+    fan_speed: int
+    fan_auto: bool
+    night_mode: bool
+
+
+LAST_DATA_LENGTH = 80
+_MODE_FROM_CODE = {"0": "cooling", "1": "heating", "3": "fan"}
+
+
 def create_headers(short_jwt: str | None = None) -> dict[str, str]:
     """Create HTTP headers for Sabiana API requests.
 
@@ -296,6 +327,74 @@ def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
     return [SabianaDevice(id=d["idDevice"], name=d["deviceName"]) for d in devices_data]
 
 
+def parse_last_data(last_data: str) -> DeviceState | None:
+    """Decode the 80-character ``lastData`` hex string reported by the device.
+
+    The Sabiana cloud returns the full device status as a fixed-length hex blob
+    embedded in each device record. Positions and scaling factors match the
+    official mobile app's decoder.
+
+    Args:
+        last_data: Raw ``lastData`` string from ``getDeviceForUserV2``.
+
+    Returns:
+        A :class:`DeviceState` snapshot, or ``None`` if the payload is the
+        wrong length or cannot be decoded (in which case the caller should
+        skip this update rather than surface stale state).
+
+    """
+    if len(last_data) != LAST_DATA_LENGTH:
+        return None
+    try:
+        mode = _MODE_FROM_CODE[last_data[11]]
+        is_on = last_data[15] != "0"
+        heating_temp = int(last_data[29:32], 16) / 10.0
+        cooling_temp = int(last_data[25:28], 16) / 10.0
+        current_temp = int(last_data[21:24], 16) / 10.0
+        fan_raw = (int(last_data[8:10], 16) - 10) / 10.0
+        fan_auto = fan_raw <= 0
+        fan_speed = 0 if fan_auto else int(round(fan_raw))
+        night_mode = int(last_data[14], 16) >= 10
+    except (KeyError, ValueError):
+        return None
+    return DeviceState(
+        is_on=is_on,
+        mode=mode,
+        heating_temp=heating_temp,
+        cooling_temp=cooling_temp,
+        current_temp=current_temp,
+        fan_speed=fan_speed,
+        fan_auto=fan_auto,
+        night_mode=night_mode,
+    )
+
+
+def extract_device_states(data: dict[str, Any]) -> dict[str, DeviceState]:
+    """Extract ``{device_id: DeviceState}`` from a device-list API response.
+
+    Devices with missing or malformed ``lastData`` are silently skipped so a
+    single bad record does not block the whole refresh.
+
+    Args:
+        data: Parsed API response from ``getDeviceForUserV2``.
+
+    Returns:
+        Mapping of ``idDevice`` to decoded :class:`DeviceState`.
+
+    """
+    devices_data = data.get("body", {}).get("devices", [])
+    states: dict[str, DeviceState] = {}
+    for d in devices_data:
+        device_id = d.get("idDevice")
+        last_data = d.get("lastData")
+        if not device_id or not isinstance(last_data, str):
+            continue
+        parsed = parse_last_data(last_data)
+        if parsed is not None:
+            states[device_id] = parsed
+    return states
+
+
 def extract_result(data: dict[str, Any]) -> bool:
     """Extract result status from API response.
 
@@ -387,6 +486,40 @@ async def async_get_devices(
     devices = extract_devices(data)
     _LOGGER.debug("Retrieved %d devices from Sabiana API", len(devices))
     return devices
+
+
+async def async_get_device_states(
+    session: httpx.AsyncClient,
+    short_jwt: str,
+) -> dict[str, DeviceState]:
+    """Fetch current device state for every device on the account.
+
+    Hits the same ``getDeviceForUserV2`` endpoint used at setup, but decodes
+    the ``lastData`` field on each record into a :class:`DeviceState`. This is
+    what the state-polling coordinator calls each cycle so Home Assistant
+    reflects changes made on the physical unit.
+
+    Args:
+        session: HTTP client session.
+        short_jwt: Short-term JWT.
+
+    Returns:
+        Mapping of ``idDevice`` to decoded :class:`DeviceState`.
+
+    Raises:
+        SabianaApiAuthError: If authentication fails.
+        SabianaApiClientError: If the API request fails.
+
+    """
+    url = f"{BASE_URL}/devices/getDeviceForUserV2"
+    headers = create_headers(short_jwt)
+
+    _LOGGER.debug("Fetching device states from Sabiana API")
+    response = await session.get(url, headers=headers)
+    data = validate_response(response)
+    states = extract_device_states(data)
+    _LOGGER.debug("Decoded state for %d device(s)", len(states))
+    return states
 
 
 async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> JWT:

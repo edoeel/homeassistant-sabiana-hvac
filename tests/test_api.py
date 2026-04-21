@@ -12,6 +12,7 @@ from pytest_httpx import HTTPXMock
 
 from custom_components.sabiana_hvac import api
 from custom_components.sabiana_hvac.api import (
+    DeviceState,
     SabianaApiAuthError,
     SabianaApiClientError,
     SabianaDevice,
@@ -20,6 +21,11 @@ from custom_components.sabiana_hvac.const import BASE_URL, USER_AGENT
 from custom_components.sabiana_hvac.models import JWT
 
 EXPECTED_DEVICE_COUNT = 2
+
+# A synthetic ``lastData`` payload chosen so the decoded fields are all known:
+#   fan hex "14" → speed 1 (FAN_LOW), mode "1" → heating, night "0" → off,
+#   on "1" → on, current "0DA" → 21.8, cooling "0FA" → 25.0, heating "0C8" → 20.0
+SAMPLE_LAST_DATA_HEATING_ON = "0000000014010001000000DA00FA00C8" + "0" * 48
 
 
 class TestSabianaApiClientError:
@@ -53,6 +59,124 @@ class TestSabianaApiAuthError:
         error = SabianaApiAuthError(error_message)
         assert isinstance(error, SabianaApiClientError)
         assert isinstance(error, Exception)
+
+
+class TestParseLastData:
+    """Tests for parse_last_data function."""
+
+    def test_parse_last_data_decodes_heating_state(self) -> None:
+        """Decodes a sample payload representing a unit heating to 20 C."""
+        state = api.parse_last_data(SAMPLE_LAST_DATA_HEATING_ON)
+        assert state == DeviceState(
+            is_on=True,
+            mode="heating",
+            heating_temp=20.0,
+            cooling_temp=25.0,
+            current_temp=21.8,
+            fan_speed=1,
+            fan_auto=False,
+            night_mode=False,
+        )
+
+    def test_parse_last_data_detects_off_state(self) -> None:
+        """Returns is_on=False when the ``on`` nibble is 0."""
+        payload = SAMPLE_LAST_DATA_HEATING_ON[:15] + "0" + SAMPLE_LAST_DATA_HEATING_ON[16:]
+        state = api.parse_last_data(payload)
+        assert state is not None
+        assert state.is_on is False
+
+    def test_parse_last_data_detects_fan_auto(self) -> None:
+        """Fan byte ``04`` → fan_speed 0 + fan_auto True (matches mobile app)."""
+        payload = SAMPLE_LAST_DATA_HEATING_ON[:8] + "04" + SAMPLE_LAST_DATA_HEATING_ON[10:]
+        state = api.parse_last_data(payload)
+        assert state is not None
+        assert state.fan_auto is True
+        assert state.fan_speed == 0
+
+    def test_parse_last_data_detects_night_mode(self) -> None:
+        """Night nibble ≥ 10 (hex ``A``) turns the sleep preset on."""
+        payload = SAMPLE_LAST_DATA_HEATING_ON[:14] + "A" + SAMPLE_LAST_DATA_HEATING_ON[15:]
+        state = api.parse_last_data(payload)
+        assert state is not None
+        assert state.night_mode is True
+
+    def test_parse_last_data_returns_none_for_wrong_length(self) -> None:
+        """A short payload returns None instead of raising."""
+        assert api.parse_last_data("abc") is None
+
+    def test_parse_last_data_returns_none_for_unknown_mode_code(self) -> None:
+        """An unknown mode digit yields None so we skip that update."""
+        payload = SAMPLE_LAST_DATA_HEATING_ON[:11] + "9" + SAMPLE_LAST_DATA_HEATING_ON[12:]
+        assert api.parse_last_data(payload) is None
+
+    def test_parse_last_data_returns_none_for_invalid_hex(self) -> None:
+        """Non-hex characters in a numeric field yield None."""
+        payload = SAMPLE_LAST_DATA_HEATING_ON[:21] + "ZZZ" + SAMPLE_LAST_DATA_HEATING_ON[24:]
+        assert api.parse_last_data(payload) is None
+
+
+class TestExtractDeviceStates:
+    """Tests for extract_device_states function."""
+
+    def test_extract_device_states_returns_states_for_each_valid_device(self) -> None:
+        """Each device with a decodable lastData appears in the result."""
+        data = {
+            "body": {
+                "devices": [
+                    {
+                        "idDevice": "device1",
+                        "deviceName": "Device 1",
+                        "lastData": SAMPLE_LAST_DATA_HEATING_ON,
+                    },
+                    {
+                        "idDevice": "device2",
+                        "deviceName": "Device 2",
+                        "lastData": SAMPLE_LAST_DATA_HEATING_ON,
+                    },
+                ],
+            },
+        }
+        states = api.extract_device_states(data)
+        assert set(states.keys()) == {"device1", "device2"}
+        assert states["device1"].mode == "heating"
+
+    def test_extract_device_states_skips_devices_with_missing_last_data(self) -> None:
+        """Devices without a lastData string are silently omitted."""
+        data = {
+            "body": {
+                "devices": [
+                    {
+                        "idDevice": "device1",
+                        "deviceName": "Device 1",
+                        "lastData": SAMPLE_LAST_DATA_HEATING_ON,
+                    },
+                    {"idDevice": "device2", "deviceName": "Device 2"},
+                ],
+            },
+        }
+        states = api.extract_device_states(data)
+        assert list(states.keys()) == ["device1"]
+
+    def test_extract_device_states_skips_devices_with_malformed_last_data(self) -> None:
+        """A malformed lastData does not abort the whole refresh."""
+        data = {
+            "body": {
+                "devices": [
+                    {
+                        "idDevice": "device1",
+                        "deviceName": "Device 1",
+                        "lastData": "too short",
+                    },
+                    {
+                        "idDevice": "device2",
+                        "deviceName": "Device 2",
+                        "lastData": SAMPLE_LAST_DATA_HEATING_ON,
+                    },
+                ],
+            },
+        }
+        states = api.extract_device_states(data)
+        assert list(states.keys()) == ["device2"]
 
 
 class TestSabianaDevice:
@@ -582,6 +706,57 @@ class TestAsyncGetDevices:
         async with httpx.AsyncClient() as session:
             with pytest.raises(SabianaApiAuthError, match=error_message):
                 await api.async_get_devices(session, sample_short_jwt_token)
+
+
+class TestAsyncGetDeviceStates:
+    """Tests for async_get_device_states function."""
+
+    @pytest.mark.asyncio
+    async def test_async_get_device_states_returns_decoded_states(
+        self,
+        httpx_mock: HTTPXMock,
+        sample_short_jwt_token: str,
+    ) -> None:
+        """Decoded DeviceState is returned keyed by device id."""
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/devices/getDeviceForUserV2",
+            method="GET",
+            json={
+                "status": 0,
+                "body": {
+                    "devices": [
+                        {
+                            "idDevice": "device1",
+                            "deviceName": "Device 1",
+                            "lastData": SAMPLE_LAST_DATA_HEATING_ON,
+                        },
+                    ],
+                },
+            },
+        )
+        async with httpx.AsyncClient() as session:
+            states = await api.async_get_device_states(
+                session,
+                sample_short_jwt_token,
+            )
+            assert "device1" in states
+            assert states["device1"].heating_temp == 20.0
+
+    @pytest.mark.asyncio
+    async def test_async_get_device_states_raises_auth_error_on_http_401(
+        self,
+        httpx_mock: HTTPXMock,
+        sample_short_jwt_token: str,
+    ) -> None:
+        """HTTP 401 surfaces as SabianaApiAuthError so the coordinator can reauth."""
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/devices/getDeviceForUserV2",
+            method="GET",
+            status_code=401,
+        )
+        async with httpx.AsyncClient() as session:
+            with pytest.raises(SabianaApiAuthError):
+                await api.async_get_device_states(session, sample_short_jwt_token)
 
 
 class TestAsyncRenewJwt:

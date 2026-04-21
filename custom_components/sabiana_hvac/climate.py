@@ -27,7 +27,7 @@ from homeassistant.const import (
     ATTR_TEMPERATURE,
     UnitOfTemperature,
 )
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -44,9 +44,23 @@ from .const import (
 )
 
 if TYPE_CHECKING:
-    from .coordinator import SabianaTokenCoordinator
+    from .coordinator import SabianaDeviceCoordinator, SabianaTokenCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+_HVAC_MODE_FROM_STATE = {
+    "cooling": HVACMode.COOL,
+    "heating": HVACMode.HEAT,
+    "fan": HVACMode.FAN_ONLY,
+}
+
+_FAN_MODE_FROM_SPEED = {
+    0: FAN_AUTO,
+    1: FAN_LOW,
+    5: FAN_MEDIUM,
+    10: FAN_HIGH,
+}
 
 
 async def async_setup_entry(
@@ -56,20 +70,31 @@ async def async_setup_entry(
 ) -> None:
     """Set up climate entities for Sabiana HVAC devices."""
     entry_data = hass.data[DOMAIN][entry.entry_id]
-    coordinator = entry_data["coordinator"]
+    token_coordinator = entry_data["coordinator"]
+    device_coordinator = entry_data["device_coordinator"]
 
     entities = [
-        SabianaHvacClimateEntity(entry_data["session"], coordinator, device)
+        SabianaHvacClimateEntity(
+            entry_data["session"],
+            token_coordinator,
+            device_coordinator,
+            device,
+        )
         for device in entry_data["devices"]
     ]
     async_add_entities(entities)
 
 
-class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
+class SabianaHvacClimateEntity(
+    CoordinatorEntity["SabianaDeviceCoordinator"],
+    ClimateEntity,
+):
     """Climate entity for Sabiana HVAC devices.
 
     Provides climate control functionality for Sabiana HVAC systems,
     including temperature control, fan modes, swing modes, and presets.
+    Subscribes to :class:`SabianaDeviceCoordinator` so state reflects
+    changes made directly on the physical device.
     """
 
     _attr_hvac_modes: ClassVar[list] = [
@@ -99,34 +124,86 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         | ClimateEntityFeature.TURN_ON
     )
     _attr_has_entity_name = True
-    _attr_should_poll = False
 
     def __init__(
         self,
         session: httpx.AsyncClient,
-        coordinator: SabianaTokenCoordinator,
+        token_coordinator: SabianaTokenCoordinator,
+        device_coordinator: SabianaDeviceCoordinator,
         device: api.SabianaDevice,
     ) -> None:
         """Initialize the Sabiana HVAC climate entity.
 
         Args:
             session: HTTP client session for API calls.
-            coordinator: Token coordinator for managing JWT tokens.
-            device: Sabiana device information.
+            token_coordinator: JWT coordinator used when issuing commands.
+            device_coordinator: State coordinator providing live device data.
+            device: Sabiana device metadata (id + name).
 
         """
+        super().__init__(device_coordinator)
         self._session = session
-        self._coordinator = coordinator
+        self._token_coordinator = token_coordinator
         self._device = device
         self._attr_unique_id = device.id
         self._attr_name = device.name
 
         self._attr_hvac_mode = HVACMode.OFF
         self._attr_target_temperature = 25.0
+        self._attr_current_temperature: float | None = None
         self._attr_fan_mode = FAN_AUTO
         self._attr_swing_mode = "Swing"
-        self._attr_preset_mode = None
-        self._coordinator_listener_unsub = None
+        self._attr_preset_mode: str | None = None
+
+        self._apply_state(self._current_state())
+
+    def _current_state(self) -> api.DeviceState | None:
+        """Return the latest DeviceState for this device, if available."""
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return data.get(self._device.id)
+
+    def _apply_state(self, state: api.DeviceState | None) -> None:
+        """Copy a DeviceState snapshot into the entity's ``_attr_*`` fields."""
+        if state is None:
+            return
+
+        if not state.is_on:
+            self._attr_hvac_mode = HVACMode.OFF
+        else:
+            self._attr_hvac_mode = _HVAC_MODE_FROM_STATE.get(
+                state.mode,
+                HVACMode.OFF,
+            )
+
+        if state.mode == "heating":
+            self._attr_target_temperature = state.heating_temp
+        else:
+            self._attr_target_temperature = state.cooling_temp
+        self._attr_current_temperature = state.current_temp
+
+        self._attr_fan_mode = (
+            FAN_AUTO
+            if state.fan_auto
+            else _FAN_MODE_FROM_SPEED.get(state.fan_speed, FAN_AUTO)
+        )
+        self._attr_preset_mode = PRESET_SLEEP if state.night_mode else None
+
+    def _handle_coordinator_update(self) -> None:
+        """Push fresh coordinator data into the entity."""
+        self._apply_state(self._current_state())
+        self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        """Report availability based on coordinator success and device presence.
+
+        We additionally require a decoded state for this device; an empty slot
+        means the cloud returned the device but its ``lastData`` was missing
+        or malformed, so we cannot trust any reading.
+        """
+        return super().available and self._current_state() is not None
 
     def _celsius_to_hex(self, temp: float) -> str:
         converted_value = int(temp * 10)
@@ -159,7 +236,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         try:
             await api.async_send_command(
                 self._session,
-                self._coordinator.short_jwt.token,
+                self._token_coordinator.short_jwt.token,
                 self._device.id,
                 command_payload,
             )
@@ -169,39 +246,18 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
                 "Authentication error for %s. Please re-configure the integration.",
                 self.name,
             )
+            return
         except SabianaApiClientError:
             _LOGGER.exception("API error while sending command to %s", self.name)
+            return
         except httpx.RequestError:
             _LOGGER.exception("Connection error while sending command to %s", self.name)
+            return
         except Exception:
             _LOGGER.exception("Unexpected error while sending command to %s", self.name)
+            return
 
-    async def async_added_to_hass(self) -> None:
-        """Handle entity being added to Home Assistant.
-
-        Restores the last known state from Home Assistant.
-        """
-        await super().async_added_to_hass()
-
-        self._coordinator_listener_unsub = self._coordinator.async_add_listener(
-            lambda: None,
-        )
-
-        if last_state := await self.async_get_last_state():
-            self._attr_hvac_mode = last_state.state
-            self._attr_target_temperature = last_state.attributes.get(ATTR_TEMPERATURE)
-            self._attr_fan_mode = last_state.attributes.get("fan_mode")
-            self._attr_swing_mode = last_state.attributes.get("swing_mode")
-            self._attr_preset_mode = last_state.attributes.get("preset_mode")
-            _LOGGER.debug("Restored state for %s", self.name)
-
-    async def async_will_remove_from_hass(self) -> None:
-        """Handle entity being removed from Home Assistant."""
-        await super().async_will_remove_from_hass()
-
-        if self._coordinator_listener_unsub is not None:
-            self._coordinator_listener_unsub()
-            self._coordinator_listener_unsub = None
+        await self.coordinator.async_request_refresh()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set the HVAC mode.

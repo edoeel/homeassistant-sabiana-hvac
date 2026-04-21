@@ -16,6 +16,8 @@ from homeassistant.components.climate.const import (
 
 DOMAIN = "sabiana_hvac"
 
+DEVICE_STATE_POLL_INTERVAL_SECONDS = 30
+
 BASE_URL = "https://be-standard.sabianawm.cloud"
 USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 11; IN2013) AppleWebKit/537.36 "

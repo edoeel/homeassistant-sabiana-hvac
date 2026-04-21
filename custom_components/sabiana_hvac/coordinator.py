@@ -16,6 +16,7 @@ from .const import (
     CONF_LONG_JWT_EXPIRE_AT,
     CONF_SHORT_JWT,
     CONF_SHORT_JWT_EXPIRE_AT,
+    DEVICE_STATE_POLL_INTERVAL_SECONDS,
     DOMAIN,
 )
 from .models import JWT
@@ -176,3 +177,62 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
 
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
         self.data = short_jwt.token
+
+
+class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, api.DeviceState]]):
+    """Polls Sabiana device state so Home Assistant reflects physical changes.
+
+    Sabiana's cloud does not push device updates to third parties; this
+    coordinator calls ``getDeviceForUserV2`` on an interval and decodes each
+    device's ``lastData`` into a :class:`api.DeviceState`. Climate entities
+    subscribe via :class:`CoordinatorEntity` and copy state over on every
+    refresh.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        session: httpx.AsyncClient,
+        token_coordinator: SabianaTokenCoordinator,
+    ) -> None:
+        """Initialize the device-state coordinator."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_device_state",
+            update_interval=timedelta(seconds=DEVICE_STATE_POLL_INTERVAL_SECONDS),
+        )
+        self.session = session
+        self.token_coordinator = token_coordinator
+
+    async def _async_update_data(self) -> dict[str, api.DeviceState]:
+        """Fetch fresh device state, refreshing the JWT once on auth failure."""
+        try:
+            return await api.async_get_device_states(
+                self.session,
+                self.token_coordinator.short_jwt.token,
+            )
+        except api.SabianaApiAuthError as err:
+            _LOGGER.debug(
+                "Auth error during device state refresh, requesting token "
+                "refresh: %s",
+                err,
+            )
+            await self.token_coordinator.async_request_refresh()
+            try:
+                return await api.async_get_device_states(
+                    self.session,
+                    self.token_coordinator.short_jwt.token,
+                )
+            except api.SabianaApiClientError as retry_err:
+                error_msg = f"API error after token refresh: {retry_err}"
+                raise UpdateFailed(error_msg) from retry_err
+            except httpx.RequestError as retry_err:
+                error_msg = f"Connection error after token refresh: {retry_err}"
+                raise UpdateFailed(error_msg) from retry_err
+        except api.SabianaApiClientError as err:
+            error_msg = f"API error during device state refresh: {err}"
+            raise UpdateFailed(error_msg) from err
+        except httpx.RequestError as err:
+            error_msg = f"Connection error during device state refresh: {err}"
+            raise UpdateFailed(error_msg) from err
