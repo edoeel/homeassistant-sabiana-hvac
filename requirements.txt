@@ -3,7 +3,7 @@ homeassistant==2025.2.4
 pip>=21.3.1
 ruff==0.15.10
 httpx>=0.24.0
-voluptuous>=0.13.0
+voluptuous>=0.16.0
 httpx-retries==0.4.6
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
