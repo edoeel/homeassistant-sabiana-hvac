@@ -229,12 +229,12 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             self._last_command_time = 0.0
 
     async def _async_retry_command(self, command_payload: str) -> None:
-        """Retry a command after refreshing the token. Called on auth error."""
+        """Retry a command after forcing a token renewal. Called on auth error."""
         try:
-            await self._coordinator.async_request_refresh()
+            token = await self._coordinator.async_force_renew()
             await api.async_send_command(
                 self._session,
-                self._coordinator.short_jwt.token,
+                token,
                 self._device.id,
                 command_payload,
             )

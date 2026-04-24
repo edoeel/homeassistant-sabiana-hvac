@@ -193,6 +193,44 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
         self.data = short_jwt.token
 
+    async def async_force_renew(self) -> str:
+        """Force an unconditional token renewal, bypassing expiry checks.
+
+        Used when the server has rejected a token that locally appears valid
+        (e.g., server-side revocation or early expiry).
+
+        Returns:
+            The new short JWT token string.
+
+        Raises:
+            UpdateFailed: If renewal fails.
+
+        """
+        _LOGGER.debug("Forcing unconditional token renewal")
+        try:
+            new_short_jwt = await api.async_renew_jwt(
+                self.session,
+                self.long_jwt.token,
+            )
+        except api.SabianaApiAuthError:
+            _LOGGER.warning(
+                "Long JWT also rejected during force renew, "
+                "attempting full re-authentication"
+            )
+            short_jwt, long_jwt = await self._async_reauth()
+            self._update_tokens(short_jwt, long_jwt)
+            return short_jwt.token
+        except api.SabianaApiClientError as err:
+            error_msg = f"API error during force renew: {err}"
+            raise UpdateFailed(error_msg) from err
+        except httpx.RequestError as err:
+            error_msg = f"Connection error during force renew: {err}"
+            raise UpdateFailed(error_msg) from err
+
+        self._update_tokens(new_short_jwt)
+        _LOGGER.info("Force-renewed short JWT token")
+        return new_short_jwt.token
+
 
 class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceState]]):
     """Coordinator that manages Sabiana device states.
