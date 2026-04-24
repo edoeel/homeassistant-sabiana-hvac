@@ -244,7 +244,7 @@ class SabianaWebSocketManager:
             _LOGGER.info("Successfully connected to Sabiana WebSocket")
             self._notify_connection_status(connected=True)
 
-        except socketio.exceptions.ConnectionError as err:
+        except (socketio.exceptions.ConnectionError, TimeoutError, OSError) as err:
             _LOGGER.warning("Failed to connect to Sabiana WebSocket: %s", err)
             self._connected = False
         except Exception:
