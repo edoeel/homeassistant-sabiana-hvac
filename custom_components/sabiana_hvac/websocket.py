@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
 import socketio
 
 from .api import decode_last_data
@@ -80,6 +81,7 @@ class SabianaWebSocketManager:
         self._get_token = get_token
         self._refresh_token = refresh_token
         self._sio: socketio.AsyncClient | None = None
+        self._http_session: aiohttp.ClientSession | None = None
         self._connected = False
         self._reconnect_task: asyncio.Task[None] | None = None
         self._shutdown = False
@@ -221,11 +223,19 @@ class SabianaWebSocketManager:
                 with contextlib.suppress(Exception):
                     await self._sio.disconnect()
                 self._sio = None
+            await self._async_close_http_session()
+
+            # Force thread-based DNS resolution for this Socket.IO client.
+            # This bypasses broken aiodns/pycares combinations observed in HA env.
+            self._http_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+            )
 
             self._sio = socketio.AsyncClient(
                 reconnection=False,  # We handle reconnection ourselves
                 logger=False,
                 engineio_logger=False,
+                http_session=self._http_session,
             )
 
             # Register event handlers
@@ -253,6 +263,13 @@ class SabianaWebSocketManager:
 
         return self._connected
 
+    async def _async_close_http_session(self) -> None:
+        """Close internal HTTP session used by Socket.IO, if any."""
+        if self._http_session is not None:
+            with contextlib.suppress(Exception):
+                await self._http_session.close()
+            self._http_session = None
+
     def _notify_connection_status(self, *, connected: bool) -> None:
         """Notify registered callbacks about connection status changes."""
         for callback in self._connection_status_callbacks:
@@ -273,7 +290,7 @@ class SabianaWebSocketManager:
             self._connected = True
 
         @self._sio.event
-        async def disconnect(reason) -> None:
+        async def disconnect(reason: str | None) -> None:
             """Handle disconnection."""
             _LOGGER.debug("Sabiana WebSocket disconnected (reason: %s)", reason)
             self._connected = False
@@ -443,6 +460,7 @@ class SabianaWebSocketManager:
             finally:
                 self._connected = False
                 self._sio = None
+        await self._async_close_http_session()
 
     async def async_refresh(self) -> None:
         """Send a refresh request to the server.
