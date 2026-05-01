@@ -5,6 +5,6 @@ ruff==0.15.12
 httpx>=0.24.0
 voluptuous>=0.13.0
 httpx-retries==0.5.0
-pytest>=7.4.0
+pytest>=9.0.3
 pytest-asyncio>=0.21.0
 pytest-httpx>=0.36.2
