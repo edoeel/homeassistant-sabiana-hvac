@@ -42,6 +42,7 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
             _LOGGER,
             name=DOMAIN,
             update_interval=timedelta(seconds=60),
+            config_entry=config_entry,
         )
         self.session = session
         self.config_entry = config_entry
