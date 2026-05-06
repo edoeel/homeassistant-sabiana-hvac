@@ -16,13 +16,19 @@ from .const import (
     CONF_LONG_JWT_EXPIRE_AT,
     CONF_SHORT_JWT,
     CONF_SHORT_JWT_EXPIRE_AT,
+    DEFAULT_POLL_INTERVAL,
     DOMAIN,
+    WS_CONNECTED_POLL_INTERVAL,
 )
-from .models import JWT
+from .models import JWT, SabianaDeviceState
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
+
+    from .websocket import SabianaWebSocketManager, WebSocketDeviceUpdate
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,17 +77,27 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         )
 
     async def _async_update_data(self) -> str:
-        """Check token expiration and refresh if needed."""
-        now = datetime.now(UTC)
+        """Check token expiration and refresh if needed.
 
-        if now >= self.long_jwt.expire_at:
-            _LOGGER.warning("Long JWT expired, performing full re-authentication")
+        Uses a safety margin to refresh tokens before they actually expire,
+        preventing race conditions where commands fail with auth errors
+        between coordinator refresh cycles.
+        """
+        now = datetime.now(UTC)
+        token_refresh_margin = timedelta(minutes=5)
+
+        if now >= (self.long_jwt.expire_at - token_refresh_margin):
+            _LOGGER.warning(
+                "Long JWT expired or expiring soon, performing full re-authentication"
+            )
             short_jwt, long_jwt = await self._async_reauth()
             self._update_tokens(short_jwt, long_jwt)
             return short_jwt.token
 
-        if now >= self.short_jwt.expire_at:
-            _LOGGER.debug("Short JWT expired, refreshing using long JWT")
+        if now >= (self.short_jwt.expire_at - token_refresh_margin):
+            _LOGGER.debug(
+                "Short JWT expired or expiring soon, refreshing using long JWT"
+            )
             try:
                 new_short_jwt = await api.async_renew_jwt(
                     self.session,
@@ -177,3 +193,211 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
 
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
         self.data = short_jwt.token
+
+    async def async_force_renew(self) -> str:
+        """Force an unconditional token renewal, bypassing expiry checks.
+
+        Used when the server has rejected a token that locally appears valid
+        (e.g., server-side revocation or early expiry).
+
+        Returns:
+            The new short JWT token string.
+
+        Raises:
+            UpdateFailed: If renewal fails.
+
+        """
+        _LOGGER.debug("Forcing unconditional token renewal")
+        try:
+            new_short_jwt = await api.async_renew_jwt(
+                self.session,
+                self.long_jwt.token,
+            )
+        except api.SabianaApiAuthError:
+            _LOGGER.warning(
+                "Long JWT also rejected during force renew, "
+                "attempting full re-authentication"
+            )
+            short_jwt, long_jwt = await self._async_reauth()
+            self._update_tokens(short_jwt, long_jwt)
+            return short_jwt.token
+        except api.SabianaApiClientError as err:
+            error_msg = f"API error during force renew: {err}"
+            raise UpdateFailed(error_msg) from err
+        except httpx.RequestError as err:
+            error_msg = f"Connection error during force renew: {err}"
+            raise UpdateFailed(error_msg) from err
+
+        self._update_tokens(new_short_jwt)
+        _LOGGER.info("Force-renewed short JWT token")
+        return new_short_jwt.token
+
+
+class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceState]]):
+    """Coordinator that manages Sabiana device states.
+
+    Uses WebSocket for real-time updates when connected, with REST API
+    polling as a fallback when WebSocket is unavailable.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        session: httpx.AsyncClient,
+        token_coordinator: SabianaTokenCoordinator,
+        device_ids: list[str],
+        websocket_manager: SabianaWebSocketManager | None = None,
+    ) -> None:
+        """Initialize the device coordinator.
+
+        Args:
+            hass: Home Assistant instance.
+            session: HTTP client session.
+            token_coordinator: Token coordinator for JWT management.
+            device_ids: List of device IDs to track.
+            websocket_manager: Optional WebSocket manager for real-time updates.
+
+        """
+        # Determine initial poll interval based on WebSocket state
+        ws_connected = websocket_manager is not None and websocket_manager.connected
+        initial_interval = (
+            WS_CONNECTED_POLL_INTERVAL if ws_connected else DEFAULT_POLL_INTERVAL
+        )
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_devices",
+            update_interval=timedelta(seconds=initial_interval),
+        )
+        self._session = session
+        self._token_coordinator = token_coordinator
+        self._device_ids = device_ids
+        self._websocket_manager = websocket_manager
+        self._unregister_ws_callback: Callable[[], None] | None = None
+        self._unregister_ws_status_callback: Callable[[], None] | None = None
+        self.data = {}
+
+        # Register for WebSocket updates if manager is available
+        if self._websocket_manager is not None:
+            self._setup_websocket_callbacks()
+
+    def _setup_websocket_callbacks(self) -> None:
+        """Set up callbacks for WebSocket events."""
+        if self._websocket_manager is None:
+            return
+
+        def on_device_update(update: WebSocketDeviceUpdate) -> None:
+            """Handle real-time device updates from WebSocket."""
+            if update.device_id not in self._device_ids:
+                return  # Not a device we're tracking
+
+            _LOGGER.debug(
+                "Received WebSocket update for device %s",
+                update.device_id,
+            )
+
+            # Update our data and notify listeners
+            self.data[update.device_id] = update.state
+            self.async_set_updated_data(self.data)
+
+        self._unregister_ws_callback = (
+            self._websocket_manager.register_device_update_callback(on_device_update)
+        )
+
+        # Also register for refresh requests
+        def on_refresh_request() -> None:
+            """Handle refresh request from server."""
+            _LOGGER.debug("Server requested refresh, triggering immediate update")
+            self.hass.async_create_task(self.async_request_refresh())
+
+        self._websocket_manager.register_refresh_callback(on_refresh_request)
+
+        # Register for connection status changes to adjust poll interval
+        def on_connection_status(*, connected: bool) -> None:
+            """Adjust poll interval based on WebSocket connection status."""
+            if connected:
+                new_interval = WS_CONNECTED_POLL_INTERVAL
+                _LOGGER.info(
+                    "WebSocket connected, increasing REST poll interval to %ds",
+                    new_interval,
+                )
+            else:
+                new_interval = DEFAULT_POLL_INTERVAL
+                _LOGGER.info(
+                    "WebSocket disconnected, reducing REST poll interval to %ds",
+                    new_interval,
+                )
+            self.update_interval = timedelta(seconds=new_interval)
+
+        self._unregister_ws_status_callback = (
+            self._websocket_manager.register_connection_status_callback(
+                on_connection_status
+            )
+        )
+
+    async def _async_update_data(self) -> dict[str, SabianaDeviceState]:
+        """Fetch device states from the API.
+
+        This is called periodically as a fallback when WebSocket updates
+        may have been missed, or when WebSocket is not connected.
+        """
+        if not self._device_ids:
+            _LOGGER.debug("No Sabiana devices registered for polling")
+            return {}
+
+        # Check if WebSocket is connected - if so, we can poll less frequently
+        ws_connected = (
+            self._websocket_manager is not None and self._websocket_manager.connected
+        )
+
+        if ws_connected:
+            _LOGGER.debug("WebSocket connected, REST poll as backup verification")
+
+        await self._token_coordinator.async_request_refresh()
+        short_jwt = self._token_coordinator.data
+
+        try:
+            # Get devices which includes lastData with current state
+            response = await self._session.get(
+                f"{api.BASE_URL}/devices/getDeviceForUserV2",
+                headers=api.create_headers(short_jwt),
+            )
+            data = api.validate_response(response)
+            states = api.extract_device_states_from_devices(data)
+
+            _LOGGER.debug("Polled status for %d devices", len(states))
+        except api.SabianaApiAuthError as err:
+            msg = f"Authentication error while polling devices: {err}"
+            raise UpdateFailed(msg) from err
+        except api.SabianaApiClientError as err:
+            msg = f"API error while polling devices: {err}"
+            raise UpdateFailed(msg) from err
+        except httpx.RequestError as err:
+            msg = f"Connection error while polling devices: {err}"
+            raise UpdateFailed(msg) from err
+
+        # Filter to only return states for our tracked devices
+        filtered_states = {
+            device_id: state
+            for device_id, state in states.items()
+            if device_id in self._device_ids
+        }
+
+        missing = set(self._device_ids) - set(filtered_states)
+        if missing:
+            _LOGGER.debug("Did not receive state for devices: %s", missing)
+
+        return filtered_states
+
+    async def async_shutdown(self) -> None:
+        """Clean up when the coordinator is being shut down."""
+        if self._unregister_ws_callback is not None:
+            self._unregister_ws_callback()
+            self._unregister_ws_callback = None
+
+        if self._unregister_ws_status_callback is not None:
+            self._unregister_ws_status_callback()
+            self._unregister_ws_status_callback = None
+
+        await super().async_shutdown()
