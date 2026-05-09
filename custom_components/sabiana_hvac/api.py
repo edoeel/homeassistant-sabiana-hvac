@@ -16,7 +16,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.httpx_client import create_async_httpx_client
 from httpx_retries import Retry, RetryTransport
 
-from .const import BASE_URL, USER_AGENT, FLAP_POSITION_TO_SWING_MODE, MODE_SETPOINT_BYTES
+from .const import (
+    BASE_URL,
+    FLAP_POSITION_TO_SWING_MODE,
+    MODE_SETPOINT_BYTES,
+    USER_AGENT,
+)
 from .models import JWT, SabianaDeviceState
 
 _LOGGER = logging.getLogger(__name__)
@@ -304,10 +309,10 @@ def decode_last_data(hex_string: str) -> SabianaDeviceState:
         Word 3 (bytes 4-5):   Fan mode (high byte=4) + HVAC mode (low byte=5)
         Word 4 (bytes 6-7):   Power state (byte 7, lower nibble) / Sleep (byte 7, bit 7)
         Word 5 (bytes 8-9):   Flap position (byte 8) + flap present flag (byte 9)
-        Word 6 (bytes 10-11): Current temperature × 10  (16-bit big-endian)
-        Word 7 (bytes 12-13): Summer setpoint × 10      (16-bit big-endian)
-        Word 8 (bytes 14-15): Winter setpoint × 10      (16-bit big-endian)
-        Word 9 (bytes 16-17): Auto setpoint × 10        (16-bit big-endian)
+        Word 6 (bytes 10-11): Current temperature x 10  (16-bit big-endian)
+        Word 7 (bytes 12-13): Summer setpoint x 10      (16-bit big-endian)
+        Word 8 (bytes 14-15): Winter setpoint x 10      (16-bit big-endian)
+        Word 9 (bytes 16-17): Auto setpoint x 10        (16-bit big-endian)
 
     Returns:
         SabianaDeviceState with decoded values or None values if decoding fails.
@@ -324,6 +329,7 @@ def decode_last_data(hex_string: str) -> SabianaDeviceState:
     byte_flap_present = 9
     byte_current_temp_high = 10
     byte_current_temp_low = 11
+    byte_auto_mode_flag = 7  # bit 2 of byte 7 = autoModeAvailable
 
     try:
         data = bytes.fromhex(hex_string)
@@ -370,6 +376,10 @@ def decode_last_data(hex_string: str) -> SabianaDeviceState:
             data[byte_flap_position], data[byte_flap_present]
         )
 
+        # Decode auto mode availability (bit 2 of byte 7)
+        # Matches app: autoModeAvaliable = n[2] from getBitToBitOK
+        auto_mode_available = bool(data[byte_auto_mode_flag] & 0x04)
+
         # Diagnostic logging: dump all bytes relevant to decoding
         _LOGGER.debug(
             "Device %s decode: mode=%s (raw=%d), target=%.1f (sp_bytes=%d-%d), "
@@ -397,6 +407,7 @@ def decode_last_data(hex_string: str) -> SabianaDeviceState:
             preset_mode=preset_mode,
             power_on=power_on,
             controller_model=controller_model,
+            auto_mode_available=auto_mode_available,
             raw_state={"lastData": hex_string, "decoded_bytes": list(data)},
         )
 
@@ -422,6 +433,7 @@ def _create_empty_device_state(
         preset_mode=None,
         power_on=None,
         controller_model=None,
+        auto_mode_available=False,
         raw_state=raw_state,
     )
 

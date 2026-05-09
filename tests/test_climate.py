@@ -163,6 +163,8 @@ class TestSabianaHvacClimateEntityInit:
         assert HVACMode.COOL in entity.hvac_modes
         assert HVACMode.HEAT in entity.hvac_modes
         assert HVACMode.FAN_ONLY in entity.hvac_modes
+        # AUTO not in default modes (added dynamically by device)
+        assert HVACMode.AUTO not in entity.hvac_modes
         assert FAN_LOW in entity.fan_modes
         assert FAN_MEDIUM in entity.fan_modes
         assert FAN_HIGH in entity.fan_modes

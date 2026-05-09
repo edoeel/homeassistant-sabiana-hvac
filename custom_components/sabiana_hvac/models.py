@@ -24,4 +24,5 @@ class SabianaDeviceState:
     preset_mode: int | str | None
     power_on: int | bool | None
     controller_model: str | None  # Controller model code (e.g., "5004" for Carisma Fly)
+    auto_mode_available: bool  # Whether AUTO HVAC mode is supported (bit 2 of byte 7)
     raw_state: dict

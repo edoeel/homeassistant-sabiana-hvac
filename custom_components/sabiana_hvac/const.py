@@ -12,7 +12,6 @@ from homeassistant.components.climate.const import (
     FAN_HIGH,
     FAN_LOW,
     FAN_MEDIUM,
-    SWING_OFF,
 )
 
 DOMAIN = "sabiana_hvac"

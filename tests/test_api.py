@@ -15,8 +15,8 @@ from custom_components.sabiana_hvac.api import (
     SabianaApiAuthError,
     SabianaApiClientError,
     SabianaDevice,
-    decode_last_data,
     _decode_swing_mode,
+    decode_last_data,
 )
 from custom_components.sabiana_hvac.const import BASE_URL, USER_AGENT
 from custom_components.sabiana_hvac.models import JWT
@@ -758,10 +758,10 @@ def _build_hex(
       Word 3 (4-5):   fan + mode
       Word 4 (6-7):   unknown2 + power/sleep
       Word 5 (8-9):   flap_pos + flap_present
-      Word 6 (10-11): current_temp_raw  (×10)
-      Word 7 (12-13): summer_sp_raw     (×10)
-      Word 8 (14-15): winter_sp_raw     (×10)
-      Word 9 (16-17): auto_sp_raw       (×10)
+      Word 6 (10-11): current_temp_raw  (x10)
+      Word 7 (12-13): summer_sp_raw     (x10)
+      Word 8 (14-15): winter_sp_raw     (x10)
+      Word 9 (16-17): auto_sp_raw       (x10)
     """
     return (
         model
@@ -977,6 +977,58 @@ class TestDecodeLastDataHvacMode:
         state = decode_last_data(hex_data)
         assert state.hvac_mode == "off"
         assert state.power_on is False
+
+
+class TestDecodeLastDataAutoModeAvailable:
+    """Tests for auto mode availability flag (bit 2 of byte 7)."""
+
+    def test_auto_mode_not_available_default(self) -> None:
+        """Default power=0x01 has bit 2 clear → auto mode not available."""
+        hex_data = _build_hex(power=0x01)
+        state = decode_last_data(hex_data)
+        assert state.auto_mode_available is False
+
+    def test_auto_mode_available_when_bit2_set(self) -> None:
+        """Power byte 0x05 (bit 0 + bit 2) → power on + auto mode available."""
+        hex_data = _build_hex(power=0x05)
+        state = decode_last_data(hex_data)
+        assert state.auto_mode_available is True
+        assert state.power_on is True
+
+    def test_auto_mode_available_with_only_bit2(self) -> None:
+        """Power byte 0x04 (only bit 2) → auto mode flag is set.
+
+        Note: our power decode treats any non-zero lower nibble as power on.
+        """
+        hex_data = _build_hex(power=0x04)
+        state = decode_last_data(hex_data)
+        assert state.auto_mode_available is True
+
+    def test_auto_mode_not_available_with_sleep(self) -> None:
+        """Power byte 0x81 (sleep + power on) → auto mode not available."""
+        hex_data = _build_hex(power=0x81)
+        state = decode_last_data(hex_data)
+        assert state.auto_mode_available is False
+        assert state.preset_mode == "sleep"
+
+    def test_auto_mode_available_with_sleep(self) -> None:
+        """Power byte 0x85 (sleep + power + auto) → both available."""
+        hex_data = _build_hex(power=0x85)
+        state = decode_last_data(hex_data)
+        assert state.auto_mode_available is True
+        assert state.preset_mode == "sleep"
+        assert state.power_on is True
+
+    def test_empty_state_has_auto_mode_false(self) -> None:
+        """Empty/error states default to auto_mode_available=False."""
+        state = decode_last_data("")
+        assert state.auto_mode_available is False
+
+        state = decode_last_data("ZZZZ")
+        assert state.auto_mode_available is False
+
+        state = decode_last_data("0000")
+        assert state.auto_mode_available is False
 
 
 class TestDecodeLastDataEdgeCases:

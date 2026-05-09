@@ -134,11 +134,12 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
 
     def _configure_features(self) -> None:
         """Configure entity features for Sabiana HVAC devices."""
+        # Default modes without AUTO — AUTO is added dynamically
+        # when the device reports autoModeAvailable=true (bit 2 of byte 7)
         self._attr_hvac_modes = [
             HVACMode.OFF,
             HVACMode.COOL,
             HVACMode.HEAT,
-            HVACMode.AUTO,
             HVACMode.FAN_ONLY,
         ]
         self._attr_fan_modes = [FAN_LOW, FAN_MEDIUM, FAN_HIGH, FAN_AUTO]
@@ -354,6 +355,23 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
 
     def _update_full_state(self, device_state: api.SabianaDeviceState) -> None:
         """Update all entity state from device state (past optimistic window)."""
+        # Dynamically add/remove AUTO mode based on device capability
+        has_auto = HVACMode.AUTO in self._attr_hvac_modes
+        if device_state.auto_mode_available and not has_auto:
+            # Insert AUTO before FAN_ONLY for consistent ordering
+            idx = self._attr_hvac_modes.index(HVACMode.FAN_ONLY)
+            self._attr_hvac_modes.insert(idx, HVACMode.AUTO)
+            _LOGGER.debug(
+                "%s: AUTO mode enabled by device capability flag",
+                self.name,
+            )
+        elif not device_state.auto_mode_available and has_auto:
+            self._attr_hvac_modes.remove(HVACMode.AUTO)
+            _LOGGER.debug(
+                "%s: AUTO mode disabled by device capability flag",
+                self.name,
+            )
+
         if device_state.hvac_mode is not None:
             try:
                 self._attr_hvac_mode = HVACMode(device_state.hvac_mode)
