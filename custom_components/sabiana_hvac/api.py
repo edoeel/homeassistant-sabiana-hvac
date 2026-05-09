@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.httpx_client import create_async_httpx_client
 from httpx_retries import Retry, RetryTransport
 
-from .const import BASE_URL, USER_AGENT
+from .const import BASE_URL, USER_AGENT, FLAP_POSITION_TO_SWING_MODE, MODE_SETPOINT_BYTES
 from .models import JWT, SabianaDeviceState
 
 _LOGGER = logging.getLogger(__name__)
@@ -299,33 +299,31 @@ def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
 def decode_last_data(hex_string: str) -> SabianaDeviceState:
     """Decode the lastData hex string into a SabianaDeviceState.
 
-    Byte Structure:
-        Bytes 1-2:  Controller model (hex)
-        Byte 4:     Fan mode
-        Byte 5:     HVAC mode (lower nibble)
-        Byte 6:     Flags (swing on bit 0)
-        Byte 7:     Power state (lower nibble) and Sleep mode (upper nibble = 0xE)
-        Byte 11:    Current temperature * 10
-        Bytes 14-15: Target temperature * 10 (big-endian)
+    Byte layout (from official Sabiana app, Modbus register mapping):
+        Word 1 (bytes 0-1):   Controller model / device type
+        Word 3 (bytes 4-5):   Fan mode (high byte=4) + HVAC mode (low byte=5)
+        Word 4 (bytes 6-7):   Power state (byte 7, lower nibble) / Sleep (byte 7, bit 7)
+        Word 5 (bytes 8-9):   Flap position (byte 8) + flap present flag (byte 9)
+        Word 6 (bytes 10-11): Current temperature × 10  (16-bit big-endian)
+        Word 7 (bytes 12-13): Summer setpoint × 10      (16-bit big-endian)
+        Word 8 (bytes 14-15): Winter setpoint × 10      (16-bit big-endian)
+        Word 9 (bytes 16-17): Auto setpoint × 10        (16-bit big-endian)
 
     Returns:
         SabianaDeviceState with decoded values or None values if decoding fails.
 
     """
-    # Constants for decoding
-    min_data_length = 16
+    # Minimum data length: 18 bytes to cover all setpoints (word 9, bytes 16-17)
+    min_data_length = 18
 
     # Byte indices
     byte_fan_mode = 4
     byte_hvac_mode = 5
-    byte_flags = 6
     byte_power_sleep = 7
-    byte_current_temp = 11
-    byte_target_temp_high = 14
-    byte_target_temp_low = 15
-
-    # Bit masks
-    mask_swing_bit = 0x01
+    byte_flap_position = 8
+    byte_flap_present = 9
+    byte_current_temp_high = 10
+    byte_current_temp_low = 11
 
     try:
         data = bytes.fromhex(hex_string)
@@ -342,16 +340,24 @@ def decode_last_data(hex_string: str) -> SabianaDeviceState:
         # Decode controller model (bytes 1-2)
         controller_model = _decode_controller_model(data)
 
-        # Decode temperatures
-        current_temp = _decode_current_temperature(data[byte_current_temp])
-        target_temp = _decode_target_temperature(
-            data[byte_target_temp_high], data[byte_target_temp_low]
-        )
-
-        # Decode HVAC mode and power state
+        # Decode HVAC mode and power state (need mode before target temp)
         hvac_mode, power_on = _decode_hvac_mode_and_power(
             data[byte_hvac_mode], data[byte_power_sleep]
         )
+
+        # Decode current temperature (word 6, bytes 10-11, 16-bit big-endian)
+        current_temp = _decode_current_temperature(
+            data[byte_current_temp_high], data[byte_current_temp_low]
+        )
+
+        # Decode target temperature (mode-aware setpoint selection)
+        raw_mode = data[byte_hvac_mode] & 0x0F
+        sp_high, sp_low = MODE_SETPOINT_BYTES.get(raw_mode, (14, 15))
+        if sp_high < len(data) and sp_low < len(data):
+            target_temp = _decode_target_temperature(data[sp_high], data[sp_low])
+        else:
+            # Fallback to winter setpoint if data too short for the mode's register
+            target_temp = _decode_target_temperature(data[14], data[15])
 
         # Decode fan mode (byte 4)
         fan_mode = _decode_fan_mode(data[byte_fan_mode])
@@ -359,8 +365,28 @@ def decode_last_data(hex_string: str) -> SabianaDeviceState:
         # Decode sleep/preset mode from status flags
         preset_mode = _decode_preset_mode(data[byte_power_sleep])
 
-        # Decode swing mode (byte 6 bit 0)
-        swing_mode = "on" if data[byte_flags] & mask_swing_bit else "off"
+        # Decode swing/flap mode (word 5: byte 8 = position, byte 9 = present flag)
+        swing_mode = _decode_swing_mode(
+            data[byte_flap_position], data[byte_flap_present]
+        )
+
+        # Diagnostic logging: dump all bytes relevant to decoding
+        _LOGGER.debug(
+            "Device %s decode: mode=%s (raw=%d), target=%.1f (sp_bytes=%d-%d), "
+            "current=%.1f, swing=%s, bytes[8-17]=[%s], full_hex=%s",
+            controller_model,
+            hvac_mode,
+            raw_mode,
+            target_temp if target_temp is not None else 0.0,
+            sp_high,
+            sp_low,
+            current_temp if current_temp is not None else 0.0,
+            swing_mode,
+            " ".join(
+                f"0x{data[i]:02X}" for i in range(8, min(18, len(data)))
+            ),
+            hex_string,
+        )
 
         return SabianaDeviceState(
             hvac_mode=hvac_mode,
@@ -416,28 +442,38 @@ def _decode_controller_model(data: bytes) -> str:
     return "UNKNOWN"
 
 
-def _decode_current_temperature(temp_byte: int) -> float | None:
-    """Decode current temperature from byte 11.
+def _decode_current_temperature(high_byte: int, low_byte: int) -> float | None:
+    """Decode current temperature from word 6 (bytes 10-11, 16-bit big-endian).
+
+    The device reports ambient temperature as a 16-bit value divided by 10.
+    E.g., 300 = 30.0°C, 225 = 22.5°C.
 
     Args:
-        temp_byte: Temperature byte value.
+        high_byte: Byte 10 (high byte of word 6).
+        low_byte: Byte 11 (low byte of word 6).
 
     Returns:
-        Temperature in Celsius or None if invalid.
+        Temperature in Celsius or None if zero.
 
     """
-    return temp_byte / 10.0 if temp_byte > 0 else None
+    raw_value = (high_byte << 8) | low_byte
+    return raw_value / 10.0 if raw_value > 0 else None
 
 
 def _decode_target_temperature(high_byte: int, low_byte: int) -> float | None:
-    """Decode target temperature from bytes 14-15 (big-endian).
+    """Decode target temperature from a setpoint word (16-bit big-endian).
+
+    The caller selects the correct byte pair based on the current HVAC mode:
+      - Summer/Cool (mode 0): word 7 = bytes 12-13
+      - Winter/Heat (mode 1): word 8 = bytes 14-15
+      - Auto        (mode 2): word 9 = bytes 16-17
 
     Args:
-        high_byte: High byte of temperature.
-        low_byte: Low byte of temperature.
+        high_byte: High byte of the setpoint word.
+        low_byte: Low byte of the setpoint word.
 
     Returns:
-        Temperature in Celsius or None if invalid.
+        Temperature in Celsius or None if zero.
 
     """
     if high_byte or low_byte:
@@ -460,11 +496,11 @@ def _decode_hvac_mode_and_power(mode_byte: int, power_byte: int) -> tuple[str, b
 
     """
     # HVAC mode mapping (byte 5 lower nibble)
-    # Must match HVAC_MODE_MAP in const.py: COOL=0, HEAT=1, DRY=2, FAN_ONLY=3
+    # Must match HVAC_MODE_MAP in const.py: COOL=0, HEAT=1, AUTO=2, FAN_ONLY=3
     hvac_mode_map = {
-        0x00: "cool",  # MODE_SUMMER
-        0x01: "heat",  # MODE_WINTER
-        0x02: "dry",  # MODE_DRY (was incorrectly mapped to "heat_cool")
+        0x00: "cool",      # MODE_SUMMER
+        0x01: "heat",      # MODE_WINTER
+        0x02: "auto",      # MODE_AUTO
         0x03: "fan_only",  # MODE_FAN_ONLY
     }
 
@@ -557,6 +593,30 @@ def _decode_preset_mode(power_sleep_byte: int) -> str:
         return "sleep"
 
     return "none"
+
+
+def _decode_swing_mode(flap_position: int, flap_present: int) -> str | None:
+    """Decode swing/flap mode from word 5 (byte 8 = position, byte 9 = present flag).
+
+    The device reports flap state as two values:
+      - byte 8: flap position (0=Standard, 1=Horizontal, 2=45°, 3=Vertical, 4=Swing)
+      - byte 9: flap present flag (1=present, 0=not present)
+
+    When flap is not present or position is 0 (Standard, not in our modes list),
+    returns None so the climate entity keeps its current optimistic value.
+
+    Args:
+        flap_position: Byte 8, the flap position value (0-4).
+        flap_present: Byte 9, the flap presence flag (0 or 1).
+
+    Returns:
+        Swing mode name, or None if flap not present / position unknown.
+
+    """
+    if flap_present != 1:
+        return None
+
+    return FLAP_POSITION_TO_SWING_MODE.get(flap_position)
 
 
 def extract_device_states_from_devices(

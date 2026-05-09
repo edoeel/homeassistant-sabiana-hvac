@@ -15,6 +15,8 @@ from custom_components.sabiana_hvac.api import (
     SabianaApiAuthError,
     SabianaApiClientError,
     SabianaDevice,
+    decode_last_data,
+    _decode_swing_mode,
 )
 from custom_components.sabiana_hvac.const import BASE_URL, USER_AGENT
 from custom_components.sabiana_hvac.models import JWT
@@ -726,3 +728,310 @@ class TestAsyncSendCommand:
                     "device1",
                     "command_data",
                 )
+
+
+# ---------------------------------------------------------------------------
+# Helpers for decode_last_data tests
+# ---------------------------------------------------------------------------
+
+
+def _build_hex(
+    *,
+    model: str = "5004",
+    unknown1: str = "0000",
+    fan: int = 0x04,
+    mode: int = 0x01,
+    unknown2: int = 0x00,
+    power: int = 0x01,
+    flap_pos: int = 0,
+    flap_present: int = 0,
+    current_temp_raw: int = 225,
+    summer_sp_raw: int = 220,
+    winter_sp_raw: int = 220,
+    auto_sp_raw: int = 220,
+) -> str:
+    """Build a lastData hex string from field values.
+
+    Byte layout:
+      Word 1 (0-1):   model
+      Word 2 (2-3):   unknown1
+      Word 3 (4-5):   fan + mode
+      Word 4 (6-7):   unknown2 + power/sleep
+      Word 5 (8-9):   flap_pos + flap_present
+      Word 6 (10-11): current_temp_raw  (×10)
+      Word 7 (12-13): summer_sp_raw     (×10)
+      Word 8 (14-15): winter_sp_raw     (×10)
+      Word 9 (16-17): auto_sp_raw       (×10)
+    """
+    return (
+        model
+        + unknown1
+        + f"{fan:02x}{mode:02x}"
+        + f"{unknown2:02x}{power:02x}"
+        + f"{flap_pos:02x}{flap_present:02x}"
+        + f"{current_temp_raw:04x}"
+        + f"{summer_sp_raw:04x}"
+        + f"{winter_sp_raw:04x}"
+        + f"{auto_sp_raw:04x}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# decode_last_data tests
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeLastDataCurrentTemperature:
+    """Tests for current temperature decoding (16-bit word 6, bytes 10-11)."""
+
+    def test_current_temp_normal_range(self) -> None:
+        """Current temperature within single-byte range (≤ 25.5°C)."""
+        hex_data = _build_hex(current_temp_raw=225)  # 22.5°C
+        state = decode_last_data(hex_data)
+        assert state.current_temperature == 22.5
+
+    def test_current_temp_above_255(self) -> None:
+        """Current temperature > 25.5°C requires 16-bit decoding."""
+        hex_data = _build_hex(current_temp_raw=300)  # 30.0°C
+        state = decode_last_data(hex_data)
+        assert state.current_temperature == 30.0
+
+    def test_current_temp_high_value(self) -> None:
+        """Current temperature at 35.0°C (350 raw)."""
+        hex_data = _build_hex(current_temp_raw=350)  # 35.0°C
+        state = decode_last_data(hex_data)
+        assert state.current_temperature == 35.0
+
+    def test_current_temp_zero_returns_none(self) -> None:
+        """Zero current temperature returns None."""
+        hex_data = _build_hex(current_temp_raw=0)
+        state = decode_last_data(hex_data)
+        assert state.current_temperature is None
+
+    def test_current_temp_fractional(self) -> None:
+        """Current temperature 28.3°C (283 raw)."""
+        hex_data = _build_hex(current_temp_raw=283)  # 28.3°C
+        state = decode_last_data(hex_data)
+        assert state.current_temperature == pytest.approx(28.3, abs=0.01)
+
+
+class TestDecodeLastDataTargetTemperature:
+    """Tests for mode-aware target temperature decoding."""
+
+    def test_cool_mode_reads_summer_setpoint(self) -> None:
+        """Cool mode (0) reads summer setpoint from bytes 12-13."""
+        hex_data = _build_hex(
+            mode=0x00,  # Cool / Summer
+            summer_sp_raw=240,   # 24.0°C
+            winter_sp_raw=180,   # 18.0°C — should NOT be read
+            auto_sp_raw=200,     # 20.0°C — should NOT be read
+        )
+        state = decode_last_data(hex_data)
+        assert state.target_temperature == 24.0
+
+    def test_heat_mode_reads_winter_setpoint(self) -> None:
+        """Heat mode (1) reads winter setpoint from bytes 14-15."""
+        hex_data = _build_hex(
+            mode=0x01,  # Heat / Winter
+            summer_sp_raw=240,   # 24.0°C — should NOT be read
+            winter_sp_raw=180,   # 18.0°C
+            auto_sp_raw=200,     # 20.0°C — should NOT be read
+        )
+        state = decode_last_data(hex_data)
+        assert state.target_temperature == 18.0
+
+    def test_auto_mode_reads_auto_setpoint(self) -> None:
+        """Auto mode (2) reads auto setpoint from bytes 16-17."""
+        hex_data = _build_hex(
+            mode=0x02,  # Auto
+            summer_sp_raw=240,   # 24.0°C — should NOT be read
+            winter_sp_raw=180,   # 18.0°C — should NOT be read
+            auto_sp_raw=215,     # 21.5°C
+        )
+        state = decode_last_data(hex_data)
+        assert state.target_temperature == 21.5
+
+    def test_fan_only_mode_falls_back_to_winter(self) -> None:
+        """Fan only mode (3) falls back to winter setpoint."""
+        hex_data = _build_hex(
+            mode=0x03,  # Fan only
+            summer_sp_raw=240,
+            winter_sp_raw=180,
+            auto_sp_raw=200,
+        )
+        state = decode_last_data(hex_data)
+        assert state.target_temperature == 18.0
+
+    def test_cool_and_heat_have_different_setpoints(self) -> None:
+        """Verify cool and heat modes read independent setpoints."""
+        cool_hex = _build_hex(mode=0x00, summer_sp_raw=260, winter_sp_raw=200)
+        heat_hex = _build_hex(mode=0x01, summer_sp_raw=260, winter_sp_raw=200)
+
+        cool_state = decode_last_data(cool_hex)
+        heat_state = decode_last_data(heat_hex)
+
+        assert cool_state.target_temperature == 26.0   # summer
+        assert heat_state.target_temperature == 20.0    # winter
+
+
+class TestDecodeLastDataSwingMode:
+    """Tests for swing/flap mode decoding (word 5, bytes 8-9)."""
+
+    def test_flap_present_position_horizontal(self) -> None:
+        """Flap present with position 1 → 'Horizontal'."""
+        hex_data = _build_hex(flap_pos=1, flap_present=1)
+        state = decode_last_data(hex_data)
+        assert state.swing_mode == "Horizontal"
+
+    def test_flap_present_position_45_degrees(self) -> None:
+        """Flap present with position 2 → '45 Degrees'."""
+        hex_data = _build_hex(flap_pos=2, flap_present=1)
+        state = decode_last_data(hex_data)
+        assert state.swing_mode == "45 Degrees"
+
+    def test_flap_present_position_vertical(self) -> None:
+        """Flap present with position 3 → 'Vertical'."""
+        hex_data = _build_hex(flap_pos=3, flap_present=1)
+        state = decode_last_data(hex_data)
+        assert state.swing_mode == "Vertical"
+
+    def test_flap_present_position_swing(self) -> None:
+        """Flap present with position 4 → 'Swing'."""
+        hex_data = _build_hex(flap_pos=4, flap_present=1)
+        state = decode_last_data(hex_data)
+        assert state.swing_mode == "Swing"
+
+    def test_flap_present_position_standard_returns_none(self) -> None:
+        """Flap present with position 0 (Standard) → None (not in modes list)."""
+        hex_data = _build_hex(flap_pos=0, flap_present=1)
+        state = decode_last_data(hex_data)
+        assert state.swing_mode is None
+
+    def test_flap_not_present_returns_none(self) -> None:
+        """Flap not present (flag=0) → None regardless of position."""
+        hex_data = _build_hex(flap_pos=4, flap_present=0)
+        state = decode_last_data(hex_data)
+        assert state.swing_mode is None
+
+    def test_flap_unknown_present_value_returns_none(self) -> None:
+        """Flap present flag not 1 (e.g. 2) → None."""
+        hex_data = _build_hex(flap_pos=4, flap_present=2)
+        state = decode_last_data(hex_data)
+        assert state.swing_mode is None
+
+
+class TestDecodeSwingModeFunction:
+    """Unit tests for _decode_swing_mode helper."""
+
+    def test_all_positions(self) -> None:
+        """Each valid position maps to correct swing mode name."""
+        assert _decode_swing_mode(1, 1) == "Horizontal"
+        assert _decode_swing_mode(2, 1) == "45 Degrees"
+        assert _decode_swing_mode(3, 1) == "Vertical"
+        assert _decode_swing_mode(4, 1) == "Swing"
+
+    def test_position_zero_returns_none(self) -> None:
+        """Position 0 (Standard) returns None."""
+        assert _decode_swing_mode(0, 1) is None
+
+    def test_not_present_returns_none(self) -> None:
+        """Flap not present returns None."""
+        assert _decode_swing_mode(4, 0) is None
+
+    def test_unknown_position_returns_none(self) -> None:
+        """Unknown position value returns None."""
+        assert _decode_swing_mode(5, 1) is None
+        assert _decode_swing_mode(255, 1) is None
+
+
+class TestDecodeLastDataHvacMode:
+    """Tests for HVAC mode decoding including the DRY→AUTO fix."""
+
+    def test_mode_0_is_cool(self) -> None:
+        """Mode byte 0 decodes to 'cool'."""
+        hex_data = _build_hex(mode=0x00)
+        state = decode_last_data(hex_data)
+        assert state.hvac_mode == "cool"
+
+    def test_mode_1_is_heat(self) -> None:
+        """Mode byte 1 decodes to 'heat'."""
+        hex_data = _build_hex(mode=0x01)
+        state = decode_last_data(hex_data)
+        assert state.hvac_mode == "heat"
+
+    def test_mode_2_is_auto(self) -> None:
+        """Mode byte 2 decodes to 'auto' (not 'dry')."""
+        hex_data = _build_hex(mode=0x02)
+        state = decode_last_data(hex_data)
+        assert state.hvac_mode == "auto"
+
+    def test_mode_3_is_fan_only(self) -> None:
+        """Mode byte 3 decodes to 'fan_only'."""
+        hex_data = _build_hex(mode=0x03)
+        state = decode_last_data(hex_data)
+        assert state.hvac_mode == "fan_only"
+
+    def test_power_off_overrides_mode(self) -> None:
+        """Power off (byte 7 lower nibble = 0) overrides mode to 'off'."""
+        hex_data = _build_hex(mode=0x01, power=0x00)
+        state = decode_last_data(hex_data)
+        assert state.hvac_mode == "off"
+        assert state.power_on is False
+
+
+class TestDecodeLastDataEdgeCases:
+    """Edge case tests for decode_last_data."""
+
+    def test_data_too_short_returns_empty_state(self) -> None:
+        """Data shorter than 18 bytes returns empty state."""
+        hex_data = "0000" * 8  # 16 bytes, need 18
+        state = decode_last_data(hex_data)
+        assert state.hvac_mode is None
+        assert state.target_temperature is None
+
+    def test_invalid_hex_returns_empty_state(self) -> None:
+        """Invalid hex string returns empty state with error."""
+        state = decode_last_data("ZZZZ")
+        assert state.hvac_mode is None
+        assert state.raw_state.get("error") == "decode_error"
+
+    def test_empty_string_returns_empty_state(self) -> None:
+        """Empty string returns empty state."""
+        state = decode_last_data("")
+        assert state.hvac_mode is None
+
+    def test_full_decode_round_trip(self) -> None:
+        """A complete decode with all fields set produces valid state."""
+        hex_data = _build_hex(
+            model="500B",
+            fan=0x03,          # high
+            mode=0x00,         # cool
+            power=0x01,
+            flap_pos=4,        # swing
+            flap_present=1,
+            current_temp_raw=283,   # 28.3°C
+            summer_sp_raw=240,      # 24.0°C
+            winter_sp_raw=200,      # 20.0°C
+            auto_sp_raw=220,        # 22.0°C
+        )
+        state = decode_last_data(hex_data)
+
+        assert state.hvac_mode == "cool"
+        assert state.power_on is True
+        assert state.current_temperature == pytest.approx(28.3, abs=0.01)
+        assert state.target_temperature == 24.0  # cool → summer setpoint
+        assert state.swing_mode == "Swing"
+        assert state.fan_mode == "high"
+
+    def test_preset_sleep_mode(self) -> None:
+        """Preset mode decoded from byte 7 bit 7."""
+        hex_data = _build_hex(power=0x81)  # bit 7 set = sleep, lower nibble = 1 = on
+        state = decode_last_data(hex_data)
+        assert state.preset_mode == "sleep"
+        assert state.power_on is True
+
+    def test_preset_none_mode(self) -> None:
+        """Preset mode is 'none' when byte 7 bit 7 is unset."""
+        hex_data = _build_hex(power=0x01)
+        state = decode_last_data(hex_data)
+        assert state.preset_mode == "none"

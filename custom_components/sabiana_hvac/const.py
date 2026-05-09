@@ -12,6 +12,7 @@ from homeassistant.components.climate.const import (
     FAN_HIGH,
     FAN_LOW,
     FAN_MEDIUM,
+    SWING_OFF,
 )
 
 DOMAIN = "sabiana_hvac"
@@ -40,10 +41,10 @@ CONF_LONG_JWT = "long_jwt"
 CONF_LONG_JWT_EXPIRE_AT = "long_jwt_expire_at"
 
 HVAC_MODE_MAP = {
-    HVACMode.COOL: "0",
-    HVACMode.HEAT: "1",
-    HVACMode.DRY: "2",
-    HVACMode.FAN_ONLY: "3",
+    HVACMode.COOL: "0",      # MODE_SUMMER
+    HVACMode.HEAT: "1",      # MODE_WINTER
+    HVACMode.AUTO: "2",      # MODE_AUTO
+    HVACMode.FAN_ONLY: "3",  # MODE_FAN_ONLY
     HVACMode.OFF: "4",
 }
 HVAC_MODE_REVERSE_MAP = {value: key for key, value in HVAC_MODE_MAP.items()}
@@ -61,3 +62,25 @@ SWING_MODE_MAP = {
     "Swing": "4",
 }
 SWING_MODE_REVERSE_MAP = {value: key for key, value in SWING_MODE_MAP.items()}
+
+# Mapping from device flap position byte value to swing mode name.
+# The device reports flap position as an integer (0-4) at byte 8,
+# with a presence flag at byte 9.
+# Position 0 ("Standard") has no matching swing mode — treated as no change.
+FLAP_POSITION_TO_SWING_MODE: dict[int, str] = {
+    1: "Horizontal",   # Summer position
+    2: "45 Degrees",   # Winter position
+    3: "Vertical",     # All open
+    4: "Swing",        # Oscillating
+}
+
+# Raw HVAC mode byte values to setpoint byte positions.
+# Each mode stores its target temperature in a different Modbus register:
+#   Summer/Cool (0) → word 7 = bytes 12-13
+#   Winter/Heat (1) → word 8 = bytes 14-15
+#   Auto        (2) → word 9 = bytes 16-17
+MODE_SETPOINT_BYTES: dict[int, tuple[int, int]] = {
+    0: (12, 13),  # Summer / Cool
+    1: (14, 15),  # Winter / Heat
+    2: (16, 17),  # Auto
+}

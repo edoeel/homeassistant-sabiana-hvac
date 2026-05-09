@@ -111,7 +111,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         self._attr_hvac_mode = HVACMode.OFF
         self._attr_target_temperature = 25.0
         self._attr_fan_mode = FAN_AUTO
-        self._attr_swing_mode = "off"  # Default to off instead of "Swing"
+        self._attr_swing_mode = "Swing"
         self._attr_preset_mode = PRESET_NONE  # Initialize to PRESET_NONE, not None
         self._coordinator_listener_unsub = None
 
@@ -138,17 +138,18 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             HVACMode.OFF,
             HVACMode.COOL,
             HVACMode.HEAT,
-            HVACMode.DRY,
+            HVACMode.AUTO,
             HVACMode.FAN_ONLY,
         ]
         self._attr_fan_modes = [FAN_LOW, FAN_MEDIUM, FAN_HIGH, FAN_AUTO]
-        self._attr_swing_modes = []  # Swing mode not currently supported
+        self._attr_swing_modes = ["Vertical", "Horizontal", "45 Degrees", "Swing"]
         # Preset modes - Sabiana devices support sleep/night mode
         self._attr_preset_modes = [PRESET_NONE, PRESET_SLEEP]
         self._attr_supported_features = (
             ClimateEntityFeature.TARGET_TEMPERATURE
             | ClimateEntityFeature.FAN_MODE
-            | ClimateEntityFeature.PRESET_MODE  # Enable preset mode by default
+            | ClimateEntityFeature.SWING_MODE
+            | ClimateEntityFeature.PRESET_MODE
             | ClimateEntityFeature.TURN_OFF
             | ClimateEntityFeature.TURN_ON
         )
@@ -375,7 +376,10 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
                 device_state.fan_mode,
             )
 
-        if device_state.swing_mode is not None:
+        if (
+            device_state.swing_mode is not None
+            and device_state.swing_mode in self._attr_swing_modes
+        ):
             self._attr_swing_mode = device_state.swing_mode
 
         if device_state.preset_mode is not None:
