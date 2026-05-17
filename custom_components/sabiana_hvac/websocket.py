@@ -1,8 +1,4 @@
-"""WebSocket manager for Sabiana HVAC real-time updates.
-
-This module provides a Socket.IO client that connects to the Sabiana
-cloud WebSocket server for receiving real-time device state updates.
-"""
+"""WebSocket manager for Sabiana HVAC real-time updates."""
 
 from __future__ import annotations
 
@@ -49,18 +45,7 @@ class WebSocketConnectionEvent:
 
 
 class SabianaWebSocketManager:
-    """Manager for Sabiana Socket.IO WebSocket connection.
-
-    This class handles the Socket.IO connection to the Sabiana cloud server,
-    authenticates using JWT tokens, and dispatches device updates to registered
-    callbacks.
-
-    The Socket.IO events handled are:
-    - data: Device state updates with lastData hex string
-    - connEvents: Device connection/disconnection events
-    - status: Device status updates (firmware version, WiFi RSSI)
-    - appMsg: Application messages (e.g., refresh requests)
-    """
+    """Manager for Sabiana Socket.IO WebSocket connection."""
 
     def __init__(
         self,
@@ -68,15 +53,7 @@ class SabianaWebSocketManager:
         get_token: Callable[[], str],
         refresh_token: Callable[[], Any] | None = None,
     ) -> None:
-        """Initialize the WebSocket manager.
-
-        Args:
-            hass: Home Assistant instance.
-            get_token: Callback function to get the current JWT token.
-            refresh_token: Optional async callback to refresh the JWT token
-                before reconnection attempts.
-
-        """
+        """Initialize the WebSocket manager."""
         self._hass = hass
         self._get_token = get_token
         self._refresh_token = refresh_token
@@ -102,89 +79,45 @@ class SabianaWebSocketManager:
         """Return True if WebSocket is connected."""
         return self._connected
 
+    def _register_callback(
+        self, callback_list: list, callback: Callable
+    ) -> Callable[[], None]:
+        """Register a callback and return an unregister function."""
+        callback_list.append(callback)
+
+        def unregister() -> None:
+            if callback in callback_list:
+                callback_list.remove(callback)
+
+        return unregister
+
     def register_device_update_callback(
         self,
         callback: Callable[[WebSocketDeviceUpdate], None],
     ) -> Callable[[], None]:
-        """Register a callback for device state updates.
-
-        Args:
-            callback: Function to call when a device update is received.
-
-        Returns:
-            A function to unregister the callback.
-
-        """
-        self._device_update_callbacks.append(callback)
-
-        def unregister() -> None:
-            if callback in self._device_update_callbacks:
-                self._device_update_callbacks.remove(callback)
-
-        return unregister
+        """Register a callback for device state updates."""
+        return self._register_callback(self._device_update_callbacks, callback)
 
     def register_connection_event_callback(
         self,
         callback: Callable[[WebSocketConnectionEvent], None],
     ) -> Callable[[], None]:
-        """Register a callback for device connection events.
-
-        Args:
-            callback: Function to call when a connection event is received.
-
-        Returns:
-            A function to unregister the callback.
-
-        """
-        self._connection_event_callbacks.append(callback)
-
-        def unregister() -> None:
-            if callback in self._connection_event_callbacks:
-                self._connection_event_callbacks.remove(callback)
-
-        return unregister
+        """Register a callback for device connection events."""
+        return self._register_callback(self._connection_event_callbacks, callback)
 
     def register_refresh_callback(
         self,
         callback: Callable[[], None],
     ) -> Callable[[], None]:
-        """Register a callback for refresh requests.
-
-        Args:
-            callback: Function to call when a refresh is requested.
-
-        Returns:
-            A function to unregister the callback.
-
-        """
-        self._refresh_callbacks.append(callback)
-
-        def unregister() -> None:
-            if callback in self._refresh_callbacks:
-                self._refresh_callbacks.remove(callback)
-
-        return unregister
+        """Register a callback for refresh requests."""
+        return self._register_callback(self._refresh_callbacks, callback)
 
     def register_connection_status_callback(
         self,
         callback: Callable[[bool], None],
     ) -> Callable[[], None]:
-        """Register a callback for WebSocket connection status changes.
-
-        Args:
-            callback: Function called with True on connect, False on disconnect.
-
-        Returns:
-            A function to unregister the callback.
-
-        """
-        self._connection_status_callbacks.append(callback)
-
-        def unregister() -> None:
-            if callback in self._connection_status_callbacks:
-                self._connection_status_callbacks.remove(callback)
-
-        return unregister
+        """Register a callback for WebSocket connection status changes."""
+        return self._register_callback(self._connection_status_callbacks, callback)
 
     async def async_connect(self) -> bool:
         """Connect to the Sabiana WebSocket server.
@@ -461,15 +394,3 @@ class SabianaWebSocketManager:
                 self._connected = False
                 self._sio = None
         await self._async_close_http_session()
-
-    async def async_refresh(self) -> None:
-        """Send a refresh request to the server.
-
-        This emits a 'refresh' event to request updated device list.
-        """
-        if self._sio is not None and self._connected:
-            try:
-                await self._sio.emit("refresh", {})
-                _LOGGER.debug("Sent refresh request to Sabiana WebSocket")
-            except Exception:
-                _LOGGER.exception("Error sending refresh request")

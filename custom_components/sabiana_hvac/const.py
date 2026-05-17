@@ -46,21 +46,25 @@ HVAC_MODE_MAP = {
     HVACMode.FAN_ONLY: "3",  # MODE_FAN_ONLY
     HVACMode.OFF: "4",
 }
-HVAC_MODE_REVERSE_MAP = {value: key for key, value in HVAC_MODE_MAP.items()}
+# Byte value → HA mode string (used by decode_last_data in api.py)
+HVAC_MODE_DECODE: dict[int, str] = {
+    0x00: "cool",      # MODE_SUMMER
+    0x01: "heat",      # MODE_WINTER
+    0x02: "auto",      # MODE_AUTO
+    0x03: "fan_only",  # MODE_FAN_ONLY
+}
 FAN_MODE_MAP = {
     FAN_LOW: "1",  # Command "1" -> State byte 7 upper nibble 0x0
     FAN_MEDIUM: "2",  # Command "2" -> State byte 7 upper nibble 0x1
     FAN_HIGH: "3",  # Command "3" -> State byte 7 upper nibble 0x3
     FAN_AUTO: "4",  # Command "4" -> State byte 7 upper nibble 0x2
 }
-FAN_MODE_REVERSE_MAP = {value: key for key, value in FAN_MODE_MAP.items()}
 SWING_MODE_MAP = {
     "Vertical": "3",
     "Horizontal": "1",
     "45 Degrees": "2",
     "Swing": "4",
 }
-SWING_MODE_REVERSE_MAP = {value: key for key, value in SWING_MODE_MAP.items()}
 
 # Mapping from device flap position byte value to swing mode name.
 # The device reports flap position as an integer (0-4) at byte 8,

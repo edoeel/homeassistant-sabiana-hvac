@@ -162,11 +162,6 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
         return f"{converted_value:04x}"
 
     @property
-    def preset_mode(self) -> str | None:
-        """Return the current preset mode."""
-        return self._attr_preset_mode
-
-    @property
     def preset_modes(self) -> list[str]:
         """Return a list of available preset modes."""
         # CRITICAL: Must always return a list, never None, or HA won't show the control
@@ -421,22 +416,12 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             self._coordinator_listener_unsub = None
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Set the HVAC mode.
-
-        Args:
-            hvac_mode: The HVAC mode to set.
-
-        """
+        """Set the HVAC mode."""
         self._attr_hvac_mode = hvac_mode
         await self._async_execute_command()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:  # noqa: ANN401
-        """Set the target temperature.
-
-        Args:
-            **kwargs: Keyword arguments containing temperature data.
-
-        """
+        """Set the target temperature."""
         self._attr_target_temperature = kwargs.get(ATTR_TEMPERATURE)
         self.async_write_ha_state()
 
@@ -444,16 +429,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             await self._async_execute_command()
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
-        """Set the fan mode.
-
-        Args:
-            fan_mode: The fan mode to set.
-
-        """
-        # CRITICAL: Set optimistic timestamp BEFORE updating state
-        # This prevents coordinator from reverting the change
-        self._last_command_time = time.monotonic()
-
+        """Set the fan mode."""
         self._attr_fan_mode = fan_mode
         self.async_write_ha_state()
 
@@ -461,16 +437,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             await self._async_execute_command()
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
-        """Set the swing mode.
-
-        Args:
-            swing_mode: The swing mode to set.
-
-        """
-        # CRITICAL: Set optimistic timestamp BEFORE updating state
-        # This prevents coordinator from reverting the change
-        self._last_command_time = time.monotonic()
-
+        """Set the swing mode."""
         self._attr_swing_mode = swing_mode
         self.async_write_ha_state()
 
@@ -478,16 +445,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             await self._async_execute_command()
 
     async def async_set_preset_mode(self, preset_mode: str | None) -> None:
-        """Set the preset mode.
-
-        Args:
-            preset_mode: The preset mode to set, or None to clear.
-
-        """
-        # CRITICAL: Set optimistic timestamp BEFORE updating state
-        # This prevents coordinator from reverting the change
-        self._last_command_time = time.monotonic()
-
+        """Set the preset mode."""
         self._attr_preset_mode = preset_mode
         self.async_write_ha_state()
 

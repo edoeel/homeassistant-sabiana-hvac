@@ -19,6 +19,7 @@ from httpx_retries import Retry, RetryTransport
 from .const import (
     BASE_URL,
     FLAP_POSITION_TO_SWING_MODE,
+    HVAC_MODE_DECODE,
     MODE_SETPOINT_BYTES,
     USER_AGENT,
 )
@@ -439,15 +440,7 @@ def _create_empty_device_state(
 
 
 def _decode_controller_model(data: bytes) -> str:
-    """Decode controller model from bytes 1-2.
-
-    Args:
-        data: Raw byte data from device.
-
-    Returns:
-        Controller model as hex string (e.g., "2000") or "UNKNOWN".
-
-    """
+    """Decode controller model from bytes 1-2."""
     min_bytes_for_model = 2
     if len(data) > min_bytes_for_model:
         return f"{data[1]:02X}{data[2]:02X}"
@@ -455,69 +448,22 @@ def _decode_controller_model(data: bytes) -> str:
 
 
 def _decode_current_temperature(high_byte: int, low_byte: int) -> float | None:
-    """Decode current temperature from word 6 (bytes 10-11, 16-bit big-endian).
-
-    The device reports ambient temperature as a 16-bit value divided by 10.
-    E.g., 300 = 30.0°C, 225 = 22.5°C.
-
-    Args:
-        high_byte: Byte 10 (high byte of word 6).
-        low_byte: Byte 11 (low byte of word 6).
-
-    Returns:
-        Temperature in Celsius or None if zero.
-
-    """
+    """Decode current temperature from word 6 (bytes 10-11, 16-bit big-endian)."""
     raw_value = (high_byte << 8) | low_byte
     return raw_value / 10.0 if raw_value > 0 else None
 
 
 def _decode_target_temperature(high_byte: int, low_byte: int) -> float | None:
-    """Decode target temperature from a setpoint word (16-bit big-endian).
-
-    The caller selects the correct byte pair based on the current HVAC mode:
-      - Summer/Cool (mode 0): word 7 = bytes 12-13
-      - Winter/Heat (mode 1): word 8 = bytes 14-15
-      - Auto        (mode 2): word 9 = bytes 16-17
-
-    Args:
-        high_byte: High byte of the setpoint word.
-        low_byte: Low byte of the setpoint word.
-
-    Returns:
-        Temperature in Celsius or None if zero.
-
-    """
+    """Decode target temperature from a setpoint word (16-bit big-endian)."""
     if high_byte or low_byte:
         return ((high_byte << 8) | low_byte) / 10.0
     return None
 
 
 def _decode_hvac_mode_and_power(mode_byte: int, power_byte: int) -> tuple[str, bool]:
-    """Decode HVAC mode and power state.
-
-    HVAC mode is in byte 5 (lower nibble).
-    Power state is determined by byte 7 (lower nibble = 0 means OFF).
-
-    Args:
-        mode_byte: Byte 5 containing HVAC mode.
-        power_byte: Byte 7 containing power state.
-
-    Returns:
-        Tuple of (hvac_mode, power_on).
-
-    """
-    # HVAC mode mapping (byte 5 lower nibble)
-    # Must match HVAC_MODE_MAP in const.py: COOL=0, HEAT=1, AUTO=2, FAN_ONLY=3
-    hvac_mode_map = {
-        0x00: "cool",      # MODE_SUMMER
-        0x01: "heat",      # MODE_WINTER
-        0x02: "auto",      # MODE_AUTO
-        0x03: "fan_only",  # MODE_FAN_ONLY
-    }
-
+    """Decode HVAC mode and power state from byte 5 and byte 7."""
     mode_nibble = mode_byte & 0x0F
-    hvac_mode = hvac_mode_map.get(mode_nibble, "heat")
+    hvac_mode = HVAC_MODE_DECODE.get(mode_nibble, "heat")
 
     # Check power state (byte 7 lower nibble = 0 means OFF)
     power_nibble = power_byte & 0x0F
@@ -592,15 +538,7 @@ def _decode_fan_mode(fan_byte: int) -> str:
 
 
 def _decode_preset_mode(power_sleep_byte: int) -> str:
-    """Decode preset/sleep mode from device status flags.
-
-    Args:
-        power_sleep_byte: Byte 7 value.
-
-    Returns:
-        Preset mode string ("sleep" or "none").
-
-    """
+    """Decode preset/sleep mode from byte 7 status flags."""
     if power_sleep_byte & 0x80:
         return "sleep"
 
@@ -608,23 +546,7 @@ def _decode_preset_mode(power_sleep_byte: int) -> str:
 
 
 def _decode_swing_mode(flap_position: int, flap_present: int) -> str | None:
-    """Decode swing/flap mode from word 5 (byte 8 = position, byte 9 = present flag).
-
-    The device reports flap state as two values:
-      - byte 8: flap position (0=Standard, 1=Horizontal, 2=45°, 3=Vertical, 4=Swing)
-      - byte 9: flap present flag (1=present, 0=not present)
-
-    When flap is not present or position is 0 (Standard, not in our modes list),
-    returns None so the climate entity keeps its current optimistic value.
-
-    Args:
-        flap_position: Byte 8, the flap position value (0-4).
-        flap_present: Byte 9, the flap presence flag (0 or 1).
-
-    Returns:
-        Swing mode name, or None if flap not present / position unknown.
-
-    """
+    """Decode swing/flap mode from word 5 (byte 8 = position, byte 9 = present flag)."""
     if flap_present != 1:
         return None
 

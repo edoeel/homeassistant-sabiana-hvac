@@ -276,6 +276,7 @@ class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceStat
         self._websocket_manager = websocket_manager
         self._unregister_ws_callback: Callable[[], None] | None = None
         self._unregister_ws_status_callback: Callable[[], None] | None = None
+        self._unregister_ws_refresh_callback: Callable[[], None] | None = None
         self.data = {}
 
         # Register for WebSocket updates if manager is available
@@ -311,7 +312,9 @@ class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceStat
             _LOGGER.debug("Server requested refresh, triggering immediate update")
             self.hass.async_create_task(self.async_request_refresh())
 
-        self._websocket_manager.register_refresh_callback(on_refresh_request)
+        self._unregister_ws_refresh_callback = (
+            self._websocket_manager.register_refresh_callback(on_refresh_request)
+        )
 
         # Register for connection status changes to adjust poll interval
         def on_connection_status(*, connected: bool) -> None:
@@ -399,5 +402,9 @@ class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceStat
         if self._unregister_ws_status_callback is not None:
             self._unregister_ws_status_callback()
             self._unregister_ws_status_callback = None
+
+        if self._unregister_ws_refresh_callback is not None:
+            self._unregister_ws_refresh_callback()
+            self._unregister_ws_refresh_callback = None
 
         await super().async_shutdown()
