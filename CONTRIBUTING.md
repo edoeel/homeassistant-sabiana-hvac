@@ -6,6 +6,7 @@ Thank you for your interest in contributing to the Home Assistant Sabiana HVAC i
 
 - [Getting Started](#getting-started)
 - [Development Environment Setup](#development-environment-setup)
+- [AI-assisted contributions](#ai-assisted-contributions)
 - [Code of Conduct](#code-of-conduct)
 - [License](#license)
 
@@ -62,6 +63,18 @@ This custom component is based on the [integration_blueprint template](https://g
 3. **Add the integration**
    - Go to Settings → Devices & Services → Add Integration
    - Search for "Sabiana HVAC" and follow the setup wizard
+
+## AI-assisted contributions
+
+Using AI coding assistants is fine. Submitting their output unchanged is not.
+
+Treat anything a model generates as a **draft** you are responsible for—not finished work. Before you open a pull request:
+
+- **Understand every change you submit.** You should be able to explain what your code does, why it is needed, and how it fits the integration. “The AI wrote it” is not an acceptable answer in review.
+- **Read with a critical eye.** Generated code often adds noise: unused imports, redundant comments, overly defensive `try/except` blocks, generic abstractions, or refactors that go beyond the task. Remove what does not serve the change.
+- **Stay aligned with this project.** Match existing naming, structure, error handling, and test patterns. Do not paste in generic “best practices” that fight the style already here.
+
+AI can speed you up; only **you** decide what is good enough to merge.
 
 ## Code of Conduct
 
