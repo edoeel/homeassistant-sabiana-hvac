@@ -12,6 +12,7 @@
 - [🚀 Installation](#-installation)
 - [⚙️ Configuration](#-configuration)
 - [🚧 Limitations](#-limitations)
+- [📐 Architecture](#-architecture)
 - [⚠️ Disclaimer & Legal Notice](#️-disclaimer--legal-notice)
 - [🤝 Contributing](#-contributing)
 - [👤 Maintainer availability](#-maintainer-availability)
@@ -70,6 +71,10 @@ Home Assistant custom integration designed to interface with Sabiana HVAC system
 
 *   **Supported Devices**: Currently, this integration has been tested and confirmed to work exclusively with **Sabiana Carisma Fly** models. Support for other models may be added in future updates.
 *   **Version Status**: This integration is currently in **Beta** phase. While functional, users may encounter bugs or unexpected behavior. Caution is advised for use in production environments, and bug reports are highly encouraged.
+
+## 📐 Architecture
+
+For a technical overview of how this integration works — WebSocket real-time updates, coordinators, JWT lifecycle, and `lastData` state decoding — see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ## ⚠️ Disclaimer & Legal Notice
 > **Important**: This integration is an unofficial independent project and is **not affiliated with, authorized, maintained, sponsored, or endorsed by Sabiana S.p.A.** or any of its affiliates or subsidiaries.
