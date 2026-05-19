@@ -29,11 +29,18 @@ Home Assistant custom integration designed to interface with Sabiana HVAC system
 
 ## 📱 Screenshots
 
-![Sabiana HVAC Card Off](images/card-off.jpg)
-![Sabiana HVAC Card On](images/card-on.jpg)
-![Sabiana HVAC Options](images/options.jpg)
+<img src="images/card-on.jpg" alt="Sabiana HVAC Card On" width="320" />
 
-*Home Assistant climate card showing Sabiana HVAC integration in action*
+<details>
+<summary>Click to view more screenshots</summary>
+
+<br/>
+<img src="images/card-off.jpg" alt="Sabiana HVAC Card Off" width="320" />
+<img src="images/options.jpg" alt="Sabiana HVAC Options" width="320" />
+
+<p><em>Home Assistant climate card showing Sabiana HVAC integration in action</em></p>
+
+</details>
 
 ## 📋 Prerequisites
 
