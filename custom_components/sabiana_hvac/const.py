@@ -40,17 +40,17 @@ CONF_LONG_JWT = "long_jwt"
 CONF_LONG_JWT_EXPIRE_AT = "long_jwt_expire_at"
 
 HVAC_MODE_MAP = {
-    HVACMode.COOL: "0",      # MODE_SUMMER
-    HVACMode.HEAT: "1",      # MODE_WINTER
-    HVACMode.AUTO: "2",      # MODE_AUTO
+    HVACMode.COOL: "0",  # MODE_SUMMER
+    HVACMode.HEAT: "1",  # MODE_WINTER
+    HVACMode.AUTO: "2",  # MODE_AUTO
     HVACMode.FAN_ONLY: "3",  # MODE_FAN_ONLY
     HVACMode.OFF: "4",
 }
 # Byte value → HA mode string (used by decode_last_data in api.py)
 HVAC_MODE_DECODE: dict[int, str] = {
-    0x00: "cool",      # MODE_SUMMER
-    0x01: "heat",      # MODE_WINTER
-    0x02: "auto",      # MODE_AUTO
+    0x00: "cool",  # MODE_SUMMER
+    0x01: "heat",  # MODE_WINTER
+    0x02: "auto",  # MODE_AUTO
     0x03: "fan_only",  # MODE_FAN_ONLY
 }
 FAN_MODE_MAP = {
@@ -71,10 +71,10 @@ SWING_MODE_MAP = {
 # with a presence flag at byte 9.
 # Position 0 ("Standard") has no matching swing mode — treated as no change.
 FLAP_POSITION_TO_SWING_MODE: dict[int, str] = {
-    1: "Horizontal",   # Summer position
-    2: "45 Degrees",   # Winter position
-    3: "Vertical",     # All open
-    4: "Swing",        # Oscillating
+    1: "Horizontal",  # Summer position
+    2: "45 Degrees",  # Winter position
+    3: "Vertical",  # All open
+    4: "Swing",  # Oscillating
 }
 
 # Raw HVAC mode byte values to setpoint byte positions.
