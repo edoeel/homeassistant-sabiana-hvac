@@ -16,8 +16,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.httpx_client import create_async_httpx_client
 from httpx_retries import Retry, RetryTransport
 
-from .const import BASE_URL, USER_AGENT
-from .models import JWT
+from .const import (
+    BASE_URL,
+    FLAP_POSITION_TO_SWING_MODE,
+    HVAC_MODE_DECODE,
+    MODE_SETPOINT_BYTES,
+    USER_AGENT,
+)
+from .models import JWT, SabianaDeviceState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -294,6 +300,281 @@ def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
     """
     devices_data = data.get("body", {}).get("devices", [])
     return [SabianaDevice(id=d["idDevice"], name=d["deviceName"]) for d in devices_data]
+
+
+def decode_last_data(hex_string: str) -> SabianaDeviceState:
+    """Decode the lastData hex string into a SabianaDeviceState.
+
+    Byte layout (from official Sabiana app, Modbus register mapping):
+        Word 1 (bytes 0-1):   Controller model / device type
+        Word 3 (bytes 4-5):   Fan mode (high byte=4) + HVAC mode (low byte=5)
+        Word 4 (bytes 6-7):   Power state (byte 7, lower nibble) / Sleep (byte 7, bit 7)
+        Word 5 (bytes 8-9):   Flap position (byte 8) + flap present flag (byte 9)
+        Word 6 (bytes 10-11): Current temperature x 10  (16-bit big-endian)
+        Word 7 (bytes 12-13): Summer setpoint x 10      (16-bit big-endian)
+        Word 8 (bytes 14-15): Winter setpoint x 10      (16-bit big-endian)
+        Word 9 (bytes 16-17): Auto setpoint x 10        (16-bit big-endian)
+
+    Returns:
+        SabianaDeviceState with decoded values or None values if decoding fails.
+
+    """
+    # Minimum data length: 18 bytes to cover all setpoints (word 9, bytes 16-17)
+    min_data_length = 18
+
+    # Byte indices
+    byte_fan_mode = 4
+    byte_hvac_mode = 5
+    byte_power_sleep = 7
+    byte_flap_position = 8
+    byte_flap_present = 9
+    byte_current_temp_high = 10
+    byte_current_temp_low = 11
+    byte_auto_mode_flag = 7  # bit 2 of byte 7 = autoModeAvailable
+
+    try:
+        data = bytes.fromhex(hex_string)
+
+        # Validate minimum data length
+        if len(data) < min_data_length:
+            _LOGGER.warning(
+                "lastData too short: %d bytes (minimum %d required)",
+                len(data),
+                min_data_length,
+            )
+            return _create_empty_device_state(hex_string)
+
+        # Decode controller model (bytes 1-2)
+        controller_model = _decode_controller_model(data)
+
+        # Decode HVAC mode and power state (need mode before target temp)
+        hvac_mode, power_on = _decode_hvac_mode_and_power(
+            data[byte_hvac_mode], data[byte_power_sleep]
+        )
+
+        # Decode current temperature (word 6, bytes 10-11, 16-bit big-endian)
+        current_temp = _decode_current_temperature(
+            data[byte_current_temp_high], data[byte_current_temp_low]
+        )
+
+        # Decode target temperature (mode-aware setpoint selection)
+        raw_mode = data[byte_hvac_mode] & 0x0F
+        sp_high, sp_low = MODE_SETPOINT_BYTES.get(raw_mode, (14, 15))
+        if sp_high < len(data) and sp_low < len(data):
+            target_temp = _decode_target_temperature(data[sp_high], data[sp_low])
+        else:
+            # Fallback to winter setpoint if data too short for the mode's register
+            target_temp = _decode_target_temperature(data[14], data[15])
+
+        # Decode fan mode (byte 4)
+        fan_mode = _decode_fan_mode(data[byte_fan_mode])
+
+        # Decode sleep/preset mode from status flags
+        preset_mode = _decode_preset_mode(data[byte_power_sleep])
+
+        # Decode swing/flap mode (word 5: byte 8 = position, byte 9 = present flag)
+        swing_mode = _decode_swing_mode(
+            data[byte_flap_position], data[byte_flap_present]
+        )
+
+        # Decode auto mode availability (bit 2 of byte 7)
+        # Matches app: autoModeAvaliable = n[2] from getBitToBitOK
+        auto_mode_available = bool(data[byte_auto_mode_flag] & 0x04)
+
+        # Diagnostic logging: dump all bytes relevant to decoding
+        _LOGGER.debug(
+            "Device %s decode: mode=%s (raw=%d), target=%.1f (sp_bytes=%d-%d), "
+            "current=%.1f, swing=%s, bytes[8-17]=[%s], full_hex=%s",
+            controller_model,
+            hvac_mode,
+            raw_mode,
+            target_temp if target_temp is not None else 0.0,
+            sp_high,
+            sp_low,
+            current_temp if current_temp is not None else 0.0,
+            swing_mode,
+            " ".join(
+                f"0x{data[i]:02X}" for i in range(8, min(18, len(data)))
+            ),
+            hex_string,
+        )
+
+        return SabianaDeviceState(
+            hvac_mode=hvac_mode,
+            target_temperature=target_temp,
+            current_temperature=current_temp,
+            fan_mode=fan_mode,
+            swing_mode=swing_mode,
+            preset_mode=preset_mode,
+            power_on=power_on,
+            controller_model=controller_model,
+            auto_mode_available=auto_mode_available,
+            raw_state={"lastData": hex_string, "decoded_bytes": list(data)},
+        )
+
+    except (ValueError, IndexError):
+        _LOGGER.exception("Failed to decode lastData")
+        return _create_empty_device_state(hex_string, error="decode_error")
+
+
+def _create_empty_device_state(
+    hex_string: str, error: str | None = None
+) -> SabianaDeviceState:
+    """Create a SabianaDeviceState with all None values."""
+    raw_state = {"lastData": hex_string}
+    if error:
+        raw_state["error"] = error
+
+    return SabianaDeviceState(
+        hvac_mode=None,
+        target_temperature=None,
+        current_temperature=None,
+        fan_mode=None,
+        swing_mode=None,
+        preset_mode=None,
+        power_on=None,
+        controller_model=None,
+        auto_mode_available=False,
+        raw_state=raw_state,
+    )
+
+
+def _decode_controller_model(data: bytes) -> str:
+    """Decode controller model from bytes 1-2."""
+    min_bytes_for_model = 2
+    if len(data) > min_bytes_for_model:
+        return f"{data[1]:02X}{data[2]:02X}"
+    return "UNKNOWN"
+
+
+def _decode_current_temperature(high_byte: int, low_byte: int) -> float | None:
+    """Decode current temperature from word 6 (bytes 10-11, 16-bit big-endian)."""
+    raw_value = (high_byte << 8) | low_byte
+    return raw_value / 10.0 if raw_value > 0 else None
+
+
+def _decode_target_temperature(high_byte: int, low_byte: int) -> float | None:
+    """Decode target temperature from a setpoint word (16-bit big-endian)."""
+    if high_byte or low_byte:
+        return ((high_byte << 8) | low_byte) / 10.0
+    return None
+
+
+def _decode_hvac_mode_and_power(mode_byte: int, power_byte: int) -> tuple[str, bool]:
+    """Decode HVAC mode and power state from byte 5 and byte 7."""
+    mode_nibble = mode_byte & 0x0F
+    hvac_mode = HVAC_MODE_DECODE.get(mode_nibble, "heat")
+
+    # Check power state (byte 7 lower nibble = 0 means OFF)
+    power_nibble = power_byte & 0x0F
+    if power_nibble == 0x00:
+        hvac_mode = "off"
+        power_on = False
+    else:
+        power_on = True
+
+    return hvac_mode, power_on
+
+
+def _decode_fan_mode(fan_byte: int) -> str:
+    """Decode fan mode from byte 4.
+
+    Verified mappings from actual device testing:
+    - 0x04: AUTO
+    - 0x14: LOW
+    - 0x3C: MEDIUM
+    - 0x6E: HIGH
+
+    Some controller models use different byte values. We use both exact
+    matching and range-based fallback to handle unknown devices gracefully.
+
+    Args:
+        fan_byte: Byte 4 value.
+
+    Returns:
+        Fan mode string (low, medium, high, auto).
+
+    """
+    # Exact mappings (verified from device testing across multiple models)
+    fan_mode_map = {
+        0x00: "auto",
+        0x01: "low",  # Reported by some controller models
+        0x02: "medium",  # Reported by some controller models
+        0x03: "high",  # Reported by some controller models
+        0x04: "auto",
+        0x14: "low",
+        0x1C: "low",  # Alternate encoding
+        0x3C: "medium",
+        0x4C: "medium",  # Alternate encoding
+        0x6E: "high",
+        0x7E: "high",  # Alternate encoding
+    }
+
+    fan_mode = fan_mode_map.get(fan_byte)
+
+    if fan_mode is not None:
+        return fan_mode
+
+    # Range-based fallback for unknown byte values
+    # This prevents silent defaulting to "auto" which causes UI revert bugs
+    _LOGGER.warning(
+        "Unknown fan mode byte: 0x%02X. Please report this value to the "
+        "integration developers. Using range-based fallback.",
+        fan_byte,
+    )
+
+    # Fan byte range thresholds for fallback classification
+    fan_auto_threshold = 0x08
+    fan_low_threshold = 0x28
+    fan_medium_threshold = 0x50
+
+    if fan_byte <= fan_auto_threshold:
+        return "auto"
+    if fan_byte <= fan_low_threshold:
+        return "low"
+    if fan_byte <= fan_medium_threshold:
+        return "medium"
+    return "high"
+
+
+def _decode_preset_mode(power_sleep_byte: int) -> str:
+    """Decode preset/sleep mode from byte 7 status flags."""
+    if power_sleep_byte & 0x80:
+        return "sleep"
+
+    return "none"
+
+
+def _decode_swing_mode(flap_position: int, flap_present: int) -> str | None:
+    """Decode swing/flap mode from word 5 (byte 8 = position, byte 9 = present flag)."""
+    if flap_present != 1:
+        return None
+
+    return FLAP_POSITION_TO_SWING_MODE.get(flap_position)
+
+
+def extract_device_states_from_devices(
+    data: dict[str, Any],
+) -> dict[str, SabianaDeviceState]:
+    """Extract device states from getDeviceForUserV2 response by decoding lastData."""
+    devices = data.get("body", {}).get("devices", [])
+    states = {}
+
+    for device in devices:
+        device_id = str(device.get("idDevice", ""))
+        device_name = str(device.get("deviceName", ""))
+        last_data = device.get("lastData", "")
+
+        if device_id and last_data:
+            states[device_id] = decode_last_data(last_data)
+            _LOGGER.debug(
+                "Decoded state for device id %s and name %s: %s",
+                device_id,
+                device_name,
+                states[device_id],
+            )
+
+    return states
 
 
 def extract_result(data: dict[str, Any]) -> bool:
