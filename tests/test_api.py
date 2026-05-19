@@ -2,6 +2,7 @@
 
 import base64
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import Mock, patch
@@ -22,6 +23,16 @@ from custom_components.sabiana_hvac.const import BASE_URL, USER_AGENT
 from custom_components.sabiana_hvac.models import JWT
 
 EXPECTED_DEVICE_COUNT = 2
+
+# Expected temperature values for decode_last_data assertions
+TEMP_22_5 = 22.5
+TEMP_30_0 = 30.0
+TEMP_35_0 = 35.0
+TEMP_18_0 = 18.0
+TEMP_20_0 = 20.0
+TEMP_21_5 = 21.5
+TEMP_24_0 = 24.0
+TEMP_26_0 = 26.0
 
 
 class TestSabianaApiClientError:
@@ -735,22 +746,9 @@ class TestAsyncSendCommand:
 # ---------------------------------------------------------------------------
 
 
-def _build_hex(
-    *,
-    model: str = "5004",
-    unknown1: str = "0000",
-    fan: int = 0x04,
-    mode: int = 0x01,
-    unknown2: int = 0x00,
-    power: int = 0x01,
-    flap_pos: int = 0,
-    flap_present: int = 0,
-    current_temp_raw: int = 225,
-    summer_sp_raw: int = 220,
-    winter_sp_raw: int = 220,
-    auto_sp_raw: int = 220,
-) -> str:
-    """Build a lastData hex string from field values.
+@dataclass
+class _HexFields:
+    """Fields for building a lastData hex string.
 
     Byte layout:
       Word 1 (0-1):   model
@@ -763,16 +761,34 @@ def _build_hex(
       Word 8 (14-15): winter_sp_raw     (x10)
       Word 9 (16-17): auto_sp_raw       (x10)
     """
+
+    model: str = "5004"
+    unknown1: str = "0000"
+    fan: int = 0x04
+    mode: int = 0x01
+    unknown2: int = 0x00
+    power: int = 0x01
+    flap_pos: int = 0
+    flap_present: int = 0
+    current_temp_raw: int = 225
+    summer_sp_raw: int = 220
+    winter_sp_raw: int = 220
+    auto_sp_raw: int = 220
+
+
+def _build_hex(**kwargs: str | int) -> str:
+    """Build a lastData hex string from field values."""
+    f = _HexFields(**kwargs)
     return (
-        model
-        + unknown1
-        + f"{fan:02x}{mode:02x}"
-        + f"{unknown2:02x}{power:02x}"
-        + f"{flap_pos:02x}{flap_present:02x}"
-        + f"{current_temp_raw:04x}"
-        + f"{summer_sp_raw:04x}"
-        + f"{winter_sp_raw:04x}"
-        + f"{auto_sp_raw:04x}"
+        f.model
+        + f.unknown1
+        + f"{f.fan:02x}{f.mode:02x}"
+        + f"{f.unknown2:02x}{f.power:02x}"
+        + f"{f.flap_pos:02x}{f.flap_present:02x}"
+        + f"{f.current_temp_raw:04x}"
+        + f"{f.summer_sp_raw:04x}"
+        + f"{f.winter_sp_raw:04x}"
+        + f"{f.auto_sp_raw:04x}"
     )
 
 
@@ -788,19 +804,19 @@ class TestDecodeLastDataCurrentTemperature:
         """Current temperature within single-byte range (≤ 25.5°C)."""
         hex_data = _build_hex(current_temp_raw=225)  # 22.5°C
         state = decode_last_data(hex_data)
-        assert state.current_temperature == 22.5
+        assert state.current_temperature == TEMP_22_5
 
     def test_current_temp_above_255(self) -> None:
         """Current temperature > 25.5°C requires 16-bit decoding."""
         hex_data = _build_hex(current_temp_raw=300)  # 30.0°C
         state = decode_last_data(hex_data)
-        assert state.current_temperature == 30.0
+        assert state.current_temperature == TEMP_30_0
 
     def test_current_temp_high_value(self) -> None:
         """Current temperature at 35.0°C (350 raw)."""
         hex_data = _build_hex(current_temp_raw=350)  # 35.0°C
         state = decode_last_data(hex_data)
-        assert state.current_temperature == 35.0
+        assert state.current_temperature == TEMP_35_0
 
     def test_current_temp_zero_returns_none(self) -> None:
         """Zero current temperature returns None."""
@@ -822,34 +838,34 @@ class TestDecodeLastDataTargetTemperature:
         """Cool mode (0) reads summer setpoint from bytes 12-13."""
         hex_data = _build_hex(
             mode=0x00,  # Cool / Summer
-            summer_sp_raw=240,   # 24.0°C
-            winter_sp_raw=180,   # 18.0°C — should NOT be read
-            auto_sp_raw=200,     # 20.0°C — should NOT be read
+            summer_sp_raw=240,  # 24.0°C
+            winter_sp_raw=180,  # 18.0°C — should NOT be read
+            auto_sp_raw=200,  # 20.0°C — should NOT be read
         )
         state = decode_last_data(hex_data)
-        assert state.target_temperature == 24.0
+        assert state.target_temperature == TEMP_24_0
 
     def test_heat_mode_reads_winter_setpoint(self) -> None:
         """Heat mode (1) reads winter setpoint from bytes 14-15."""
         hex_data = _build_hex(
             mode=0x01,  # Heat / Winter
-            summer_sp_raw=240,   # 24.0°C — should NOT be read
-            winter_sp_raw=180,   # 18.0°C
-            auto_sp_raw=200,     # 20.0°C — should NOT be read
+            summer_sp_raw=240,  # 24.0°C — should NOT be read
+            winter_sp_raw=180,  # 18.0°C
+            auto_sp_raw=200,  # 20.0°C — should NOT be read
         )
         state = decode_last_data(hex_data)
-        assert state.target_temperature == 18.0
+        assert state.target_temperature == TEMP_18_0
 
     def test_auto_mode_reads_auto_setpoint(self) -> None:
         """Auto mode (2) reads auto setpoint from bytes 16-17."""
         hex_data = _build_hex(
             mode=0x02,  # Auto
-            summer_sp_raw=240,   # 24.0°C — should NOT be read
-            winter_sp_raw=180,   # 18.0°C — should NOT be read
-            auto_sp_raw=215,     # 21.5°C
+            summer_sp_raw=240,  # 24.0°C — should NOT be read
+            winter_sp_raw=180,  # 18.0°C — should NOT be read
+            auto_sp_raw=215,  # 21.5°C
         )
         state = decode_last_data(hex_data)
-        assert state.target_temperature == 21.5
+        assert state.target_temperature == TEMP_21_5
 
     def test_fan_only_mode_falls_back_to_winter(self) -> None:
         """Fan only mode (3) falls back to winter setpoint."""
@@ -860,7 +876,7 @@ class TestDecodeLastDataTargetTemperature:
             auto_sp_raw=200,
         )
         state = decode_last_data(hex_data)
-        assert state.target_temperature == 18.0
+        assert state.target_temperature == TEMP_18_0
 
     def test_cool_and_heat_have_different_setpoints(self) -> None:
         """Verify cool and heat modes read independent setpoints."""
@@ -870,8 +886,8 @@ class TestDecodeLastDataTargetTemperature:
         cool_state = decode_last_data(cool_hex)
         heat_state = decode_last_data(heat_hex)
 
-        assert cool_state.target_temperature == 26.0   # summer
-        assert heat_state.target_temperature == 20.0    # winter
+        assert cool_state.target_temperature == TEMP_26_0  # summer
+        assert heat_state.target_temperature == TEMP_20_0  # winter
 
 
 class TestDecodeLastDataSwingMode:
@@ -1056,22 +1072,22 @@ class TestDecodeLastDataEdgeCases:
         """A complete decode with all fields set produces valid state."""
         hex_data = _build_hex(
             model="500B",
-            fan=0x03,          # high
-            mode=0x00,         # cool
+            fan=0x03,  # high
+            mode=0x00,  # cool
             power=0x01,
-            flap_pos=4,        # swing
+            flap_pos=4,  # swing
             flap_present=1,
-            current_temp_raw=283,   # 28.3°C
-            summer_sp_raw=240,      # 24.0°C
-            winter_sp_raw=200,      # 20.0°C
-            auto_sp_raw=220,        # 22.0°C
+            current_temp_raw=283,  # 28.3°C
+            summer_sp_raw=240,  # 24.0°C
+            winter_sp_raw=200,  # 20.0°C
+            auto_sp_raw=220,  # 22.0°C
         )
         state = decode_last_data(hex_data)
 
         assert state.hvac_mode == "cool"
         assert state.power_on is True
         assert state.current_temperature == pytest.approx(28.3, abs=0.01)
-        assert state.target_temperature == 24.0  # cool → summer setpoint
+        assert state.target_temperature == TEMP_24_0  # cool → summer setpoint
         assert state.swing_mode == "Swing"
         assert state.fan_mode == "high"
 
