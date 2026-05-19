@@ -12,9 +12,10 @@
 - [🚀 Installation](#-installation)
 - [⚙️ Configuration](#-configuration)
 - [🚧 Limitations](#-limitations)
-- [🌟 Upcoming Features](#-upcoming-features)
+- [📐 Architecture](#-architecture)
 - [⚠️ Disclaimer & Legal Notice](#️-disclaimer--legal-notice)
 - [🤝 Contributing](#-contributing)
+- [👤 Maintainer availability](#-maintainer-availability)
 - [❓ Support](#-support)
 - [📄 License](#-license)
 
@@ -28,16 +29,25 @@ Home Assistant custom integration designed to interface with Sabiana HVAC system
 
 ## 📱 Screenshots
 
-![Sabiana HVAC Card](images/card.png)
+<img src="images/card-on.jpg" alt="Sabiana HVAC Card On" width="320" />
 
-*Home Assistant climate card showing Sabiana HVAC integration in action*
+<details>
+<summary>Click to view more screenshots</summary>
+
+<br/>
+<img src="images/card-off.jpg" alt="Sabiana HVAC Card Off" width="320" />
+<img src="images/options.jpg" alt="Sabiana HVAC Options" width="320" />
+
+<p><em>Home Assistant climate card showing Sabiana HVAC integration in action</em></p>
+
+</details>
 
 ## 📋 Prerequisites
 
 *   **Home Assistant Instance:** A fully operational Home assistant installation.
 *   **HACS:** [Home Assistant Community Store](https://hacs.xyz/) is highly recommended for simplified installation and updates of this custom integration.
 *   **Sabiana Account:** A valid user account registered with the official Sabiana mobile application.
-*   **Pre-Paired Devices:** Ensure your Sabiana HVAC devices are already paired and configured via the official Sabiana WiFi or Sabiana BLE mobile application. This integration leverages the existing cloud infrastructure for device communication.
+*   **Pre-Paired Devices:** Ensure your Sabiana HVAC devices are already paired and configured via the official Sabiana WiFi mobile application. This integration leverages the existing cloud infrastructure for device communication.
 
 ## 🚀 Installation
 
@@ -69,9 +79,9 @@ Home Assistant custom integration designed to interface with Sabiana HVAC system
 *   **Supported Devices**: Currently, this integration has been tested and confirmed to work exclusively with **Sabiana Carisma Fly** models. Support for other models may be added in future updates.
 *   **Version Status**: This integration is currently in **Beta** phase. While functional, users may encounter bugs or unexpected behavior. Caution is advised for use in production environments, and bug reports are highly encouraged.
 
-## 🌟 Upcoming Features
+## 📐 Architecture
 
-*   **Polling for Real-time State:** Implementation of a polling mechanism to retrieve and update the real-time operational state of each device. Currently, the device state is managed optimistically, meaning Home Assistant reflects the last commanded state rather than the actual device state.
+For a technical overview of how this integration works — WebSocket real-time updates, coordinators, JWT lifecycle, and `lastData` state decoding — see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ## ⚠️ Disclaimer & Legal Notice
 > **Important**: This integration is an unofficial independent project and is **not affiliated with, authorized, maintained, sponsored, or endorsed by Sabiana S.p.A.** or any of its affiliates or subsidiaries.
@@ -98,7 +108,15 @@ All product names, logos, and registered trademarks are property of their respec
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and guidelines before opening a pull request.
+
+## 👤 Maintainer availability
+
+This integration is maintained in my spare time. It is not my main job, it does not pay my bills, and I have a family and other priorities outside this repository.
+
+That means issues and pull request reviews may take a while. Please be patient.
+
+**I am grateful for every bug report, question, and contribution**.
 
 ## ❓ Support
 

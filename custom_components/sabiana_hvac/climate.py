@@ -246,9 +246,7 @@ class SabianaHvacClimateEntity(ClimateEntity, RestoreEntity):
             )
             self._last_command_time = 0.0
         except (SabianaApiClientError, httpx.RequestError):
-            _LOGGER.exception(
-                "Error sending command to %s on retry", self.name
-            )
+            _LOGGER.exception("Error sending command to %s on retry", self.name)
             self._last_command_time = 0.0
 
     async def _async_delayed_refresh(self) -> None:

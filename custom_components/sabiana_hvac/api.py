@@ -393,9 +393,7 @@ def decode_last_data(hex_string: str) -> SabianaDeviceState:
             sp_low,
             current_temp if current_temp is not None else 0.0,
             swing_mode,
-            " ".join(
-                f"0x{data[i]:02X}" for i in range(8, min(18, len(data)))
-            ),
+            " ".join(f"0x{data[i]:02X}" for i in range(8, min(18, len(data)))),
             hex_string,
         )
 
