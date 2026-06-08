@@ -299,7 +299,13 @@ def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
 
     """
     devices_data = data.get("body", {}).get("devices", [])
-    return [SabianaDevice(id=d["idDevice"], name=d["deviceName"]) for d in devices_data]
+    return [
+        SabianaDevice(
+            id=d["idDevice"],
+            name=d.get("deviceName") or d["idDevice"],
+        )
+        for d in devices_data
+    ]
 
 
 def decode_last_data(hex_string: str) -> SabianaDeviceState:
