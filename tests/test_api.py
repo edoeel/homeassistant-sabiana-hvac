@@ -423,6 +423,20 @@ class TestExtractDevices:
         devices = api.extract_devices(data)
         assert devices == []
 
+    def test_extract_devices_uses_id_when_device_name_missing(self) -> None:
+        """Test extract_devices falls back to idDevice when deviceName is absent."""
+        data = {
+            "body": {
+                "devices": [
+                    {"idDevice": "device1", "deviceName": "Device 1"},
+                    {"idDevice": "device2"},
+                ],
+            },
+        }
+        devices = api.extract_devices(data)
+        assert devices[1].id == "device2"
+        assert devices[1].name == "device2"
+
 
 class TestExtractResult:
     """Tests for extract_result function."""
