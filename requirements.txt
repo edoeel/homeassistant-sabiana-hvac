@@ -5,7 +5,7 @@ ruff==0.15.16
 httpx>=0.28.1
 voluptuous>=0.13.0
 httpx-retries==0.5.0
-pytest>=9.0.3
+pytest>=9.1.0
 pytest-asyncio>=1.4.0
 pytest-httpx>=0.36.2
 python-socketio[asyncio_client]>=5.16.2
