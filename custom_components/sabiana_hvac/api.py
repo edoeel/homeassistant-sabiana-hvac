@@ -469,13 +469,10 @@ def _decode_hvac_mode_and_power(mode_byte: int, power_byte: int) -> tuple[str, b
     mode_nibble = mode_byte & 0x0F
     hvac_mode = HVAC_MODE_DECODE.get(mode_nibble, "heat")
 
-    # Check power state (byte 7 lower nibble = 0 means OFF)
-    power_nibble = power_byte & 0x0F
-    if power_nibble == 0x00:
+    # Check power state (byte 7 bit 0 = 1 means ON)
+    power_on = bool(power_byte & 0x01)
+    if not power_on:
         hvac_mode = "off"
-        power_on = False
-    else:
-        power_on = True
 
     return hvac_mode, power_on
 
