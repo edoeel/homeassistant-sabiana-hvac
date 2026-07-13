@@ -10,8 +10,8 @@
   "requirements": [
     "httpx>=0.24.0",
     "voluptuous>=0.13.0",
-    "httpx-retries==0.2.0",
+    "httpx-retries==0.6.0",
     "python-socketio[asyncio_client]>=5.0.0"
   ],
-  "version": "0.1.2"
+  "version": "0.1.3"
 }

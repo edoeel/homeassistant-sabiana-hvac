@@ -4,12 +4,11 @@ import base64
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock, patch
 
 import httpx
 import pytest
-from pytest_httpx import HTTPXMock
 
 from custom_components.sabiana_hvac import api
 from custom_components.sabiana_hvac.api import (
@@ -21,6 +20,9 @@ from custom_components.sabiana_hvac.api import (
 )
 from custom_components.sabiana_hvac.const import BASE_URL, USER_AGENT
 from custom_components.sabiana_hvac.models import JWT
+
+if TYPE_CHECKING:
+    from pytest_httpx import HTTPXMock
 
 EXPECTED_DEVICE_COUNT = 2
 
