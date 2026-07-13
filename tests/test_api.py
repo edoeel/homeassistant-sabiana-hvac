@@ -1002,8 +1002,15 @@ class TestDecodeLastDataHvacMode:
         assert state.hvac_mode == "fan_only"
 
     def test_power_off_overrides_mode(self) -> None:
-        """Power off (byte 7 lower nibble = 0) overrides mode to 'off'."""
+        """Power off (byte 7 bit 0 = 0) overrides mode to 'off'."""
         hex_data = _build_hex(mode=0x01, power=0x00)
+        state = decode_last_data(hex_data)
+        assert state.hvac_mode == "off"
+        assert state.power_on is False
+
+    def test_power_off_with_auto_available_overrides_mode(self) -> None:
+        """Power off with auto available (byte 7 = 0x04) overrides mode to 'off'."""
+        hex_data = _build_hex(mode=0x01, power=0x04)
         state = decode_last_data(hex_data)
         assert state.hvac_mode == "off"
         assert state.power_on is False
@@ -1026,13 +1033,11 @@ class TestDecodeLastDataAutoModeAvailable:
         assert state.power_on is True
 
     def test_auto_mode_available_with_only_bit2(self) -> None:
-        """Power byte 0x04 (only bit 2) → auto mode flag is set.
-
-        Note: our power decode treats any non-zero lower nibble as power on.
-        """
+        """Power byte 0x04 (only bit 2) → auto mode flag is set, power is OFF."""
         hex_data = _build_hex(power=0x04)
         state = decode_last_data(hex_data)
         assert state.auto_mode_available is True
+        assert state.power_on is False
 
     def test_auto_mode_not_available_with_sleep(self) -> None:
         """Power byte 0x81 (sleep + power on) → auto mode not available."""
