@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Tests for the Sabiana HVAC API client."""
 
 import base64

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Coordinator for Sabiana HVAC integration."""
 
 from __future__ import annotations

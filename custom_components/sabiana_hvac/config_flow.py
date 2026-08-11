@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Configuration flow for Sabiana HVAC integration.
 
 This module handles the setup and configuration of the Sabiana HVAC

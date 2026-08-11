@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """WebSocket manager for Sabiana HVAC real-time updates."""
 
 from __future__ import annotations

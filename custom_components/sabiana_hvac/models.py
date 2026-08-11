@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Data models for Sabiana HVAC integration."""
 
 from dataclasses import dataclass

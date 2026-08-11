@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Tests for the Sabiana Token Coordinator."""
 
 import base64

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Tests for the Sabiana HVAC Config Flow."""
 
 from datetime import UTC, datetime, timedelta
