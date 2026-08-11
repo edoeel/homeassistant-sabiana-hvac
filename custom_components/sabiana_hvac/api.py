@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """API client for Sabiana HVAC systems.
 
 This module provides functions to interact with the Sabiana API,

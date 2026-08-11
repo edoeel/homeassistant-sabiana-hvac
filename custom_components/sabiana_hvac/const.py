@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Constants for Sabiana HVAC integration.
 
 This module contains all the constants used throughout the integration,

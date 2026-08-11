@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Pytest configuration and fixtures for Sabiana HVAC tests."""
 
 import base64

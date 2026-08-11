@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Climate entities for Sabiana HVAC systems.
 
 This module provides climate entities that represent Sabiana HVAC devices

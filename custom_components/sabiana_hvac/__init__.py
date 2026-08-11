@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Edoardo Mistretta
+
 """Sabiana HVAC integration for Home Assistant.
 
 This integration provides climate control for Sabiana HVAC systems.
