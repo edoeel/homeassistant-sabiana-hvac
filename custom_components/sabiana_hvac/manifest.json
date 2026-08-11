@@ -13,5 +13,5 @@
     "httpx-retries==0.6.0",
     "python-socketio[asyncio_client]>=5.0.0"
   ],
-  "version": "0.1.3"
+  "version": "0.1.4"
 }
