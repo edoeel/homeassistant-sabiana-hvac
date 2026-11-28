@@ -525,13 +525,17 @@ class TestCommands:
             await entity.async_set_preset_mode(PRESET_SLEEP)
 
     @pytest.mark.asyncio
-    async def test_setpoint_and_fan_need_the_unit_on(
+    async def test_setpoint_fan_and_flap_need_the_unit_on(
         self,
         entity: SabianaHvacClimateEntity,
         device_coordinator: Mock,
         send: AsyncMock,
     ) -> None:
-        """App: while off only on/off and the flap can be used."""
+        """App: while off only on/off can be used (the flap control is hidden).
+
+        The firmware stores a flap sent with an off command (seen on a 500D:
+        "Swing" set while off was reported as 0401 while still off).
+        """
         _set_frame(
             device_coordinator, build_frame(flap=0x0401, flags=FLAGS_ON & ~FLAG_ON)
         )
@@ -539,10 +543,22 @@ class TestCommands:
             await entity.async_set_temperature(**{ATTR_TEMPERATURE: 22})
         with pytest.raises(ServiceValidationError, match="fan speed"):
             await entity.async_set_fan_mode("high")
+        with pytest.raises(ServiceValidationError, match="flap"):
+            await entity.async_set_swing_mode("Stop swing")
         send.assert_not_awaited()
 
-        await entity.async_set_swing_mode("Stop swing")  # the flap works when off
-        assert _sent(send) == "040400C80001FFFF0000"
+    @pytest.mark.asyncio
+    async def test_flap_refused_while_turning_off_is_pending(
+        self,
+        entity: SabianaHvacClimateEntity,
+        send: AsyncMock,
+    ) -> None:
+        """Once off is pressed the app hides the flap, before the frame confirms."""
+        await entity.async_turn_off()
+        assert _sent(send).startswith("0404")
+        with pytest.raises(ServiceValidationError, match="flap"):
+            await entity.async_set_swing_mode("Stop swing")
+        assert send.await_count == 1
 
     @pytest.mark.asyncio
     async def test_setpoint_with_turn_on_is_allowed_when_off(

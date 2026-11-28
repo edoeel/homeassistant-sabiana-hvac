@@ -426,6 +426,9 @@ class SabianaHvacClimateEntity(ClimateEntity):
         if not state.flap_present or swing_mode not in (self.swing_modes or []):
             msg = f"Swing mode {swing_mode} is not supported by {self._device.name}"
             raise ServiceValidationError(msg)
+        # App: the flap control is hidden while the unit is off. The firmware
+        # would store a flap sent with an off command and move the flap.
+        self._check_on(view, "the flap")
         position = SWING_MODE_TO_FLAP_POSITION[swing_mode]
         await self._async_apply(replace(view, flap_position=position))
 
@@ -472,8 +475,8 @@ class SabianaHvacClimateEntity(ClimateEntity):
     def _check_on(self, command: FancoilCommand, what: str) -> None:
         """Refuse a change the app only allows while the unit is on.
 
-        App: while off only the on/off control (and the flap) can be used;
-        setpoint, fan and night mode need the unit on.
+        App: while off only the on/off control can be used; setpoint, fan,
+        night mode and flap need the unit on.
         """
         if not command.on:
             msg = f"Turn {self._device.name} on to change {what}"

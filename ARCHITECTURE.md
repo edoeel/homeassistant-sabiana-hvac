@@ -335,7 +335,7 @@ Capabilities are read from the unit's profile and state at every update:
 ### Command Execution Pipeline
 
 1. A service call builds a `FancoilCommand` from the shown values; nothing is sent if nothing changes.
-2. Checks from the app: turning on (or choosing a mode) is refused while the remote on/off contact is active; while the unit is off only on/off and the flap can be changed (setpoint, fan and night mode need it on, unless the same call turns it on); commands are refused while the WebSocket is down or the unit is offline or its data is not valid.
+2. Checks from the app: turning on (or choosing a mode) is refused while the remote on/off contact is active; while the unit is off only on/off can be changed (setpoint, fan, night mode and flap need it on, unless the same call turns it on; the app hides the flap control while off, and the firmware would store a flap sent with an off command); commands are refused while the WebSocket is down or the unit is offline or its data is not valid.
 3. The command becomes *pending* and is shown at once.
 4. Sending is throttled like the app: the first change goes out immediately, later changes within 1.5 s are merged into one trailing command with the latest values.
 5. `POST /devices/cmd` with a fresh token; on `SabianaApiAuthError` → `async_force_renew()` and one retry. A rotated long JWT in the response is stored. A failed send clears the pending command and raises `HomeAssistantError`.
