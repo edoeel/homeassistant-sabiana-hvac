@@ -23,7 +23,7 @@ Home Assistant custom integration designed to interface with Sabiana HVAC system
 
 ## ✨ Features
 
-*   **🌡️ Advanced Climate Control:** Gain granular control over Sabiana HVAC units, including setting HVAC modes (e.g., Cool, Heat, Fan Only, Off), target temperatures, fan speeds (Low, Medium, High, Auto), and swing modes.
+*   **🌡️ Advanced Climate Control:** Gain granular control over Sabiana HVAC units, including setting HVAC modes (e.g., Cool, Heat, Fan Only, Off), target temperatures, fan speeds on the unit's own scale (Low, Medium, High, Auto on stepped models; Auto and levels 1–10 on continuous models such as the Whisper), flap positions and the night mode where the model has them.
 *   **🔐 Secure API Authentication:** Utilizes secure, JWT-based authentication with the official Sabiana cloud API. User credentials (email and password) are securely stored exclusively on your local Home Assistant instance and are used solely for direct authentication with Sabiana servers.
 *   **🖥️ Native Home Assistant UI Integration:** Devices are exposed as standard Home Assistant climate entities, enabling full control and monitoring through the native user interface, automations, and scripts.
 
