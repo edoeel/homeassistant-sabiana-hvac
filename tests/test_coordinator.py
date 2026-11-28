@@ -4,6 +4,7 @@
 
 import base64
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
@@ -20,8 +21,20 @@ from custom_components.sabiana_hvac.const import (
     CONF_SHORT_JWT,
     CONF_SHORT_JWT_EXPIRE_AT,
 )
-from custom_components.sabiana_hvac.coordinator import SabianaTokenCoordinator
-from custom_components.sabiana_hvac.models import JWT
+from custom_components.sabiana_hvac.coordinator import (
+    SabianaDeviceCoordinator,
+    SabianaTokenCoordinator,
+)
+from custom_components.sabiana_hvac.models import (
+    JWT,
+    SabianaDevice,
+    SabianaDeviceList,
+)
+from custom_components.sabiana_hvac.websocket import (
+    WebSocketConnectionEvent,
+    WebSocketDeviceUpdate,
+    WebSocketStatusEvent,
+)
 
 NEW_SHORT_JWT_VALUE = "new_short"
 NEW_LONG_JWT_VALUE = "new_long"
@@ -33,7 +46,7 @@ def mock_hass() -> Mock:
     """Create a mock Home Assistant instance."""
     hass = Mock()
     hass.config_entries = Mock()
-    hass.config_entries.async_update_entry = AsyncMock()
+    hass.config_entries.async_update_entry = Mock()
     return hass
 
 
@@ -556,3 +569,385 @@ class TestSabianaTokenCoordinatorUpdateTokens:
         coordinator._update_tokens(new_short_jwt)
         call_args = mock_hass.config_entries.async_update_entry.call_args
         assert call_args[1]["data"][CONF_EMAIL] == original_email
+
+
+# ---------------------------------------------------------------------------
+# Long JWT rotation (app: checkResponse)
+# ---------------------------------------------------------------------------
+
+
+class TestSabianaTokenCoordinatorStoreRotatedLongJwt:
+    """Tests for store_rotated_long_jwt."""
+
+    def test_stores_rotated_token(
+        self, mock_hass: Mock, mock_session: Mock, mock_config_entry: Mock
+    ) -> None:
+        """A new long JWT is saved with its expiry, other data kept."""
+        coordinator = SabianaTokenCoordinator(
+            mock_hass, mock_session, mock_config_entry
+        )
+        exp = int(datetime.now(UTC).timestamp()) + 86400 * 90
+        token = _jwt(exp)
+
+        coordinator.store_rotated_long_jwt(token)
+
+        data = mock_hass.config_entries.async_update_entry.call_args.kwargs["data"]
+        assert data[CONF_LONG_JWT] == token
+        assert data[CONF_LONG_JWT_EXPIRE_AT] == exp
+        assert data[CONF_SHORT_JWT] == mock_config_entry.data[CONF_SHORT_JWT]
+        assert data[CONF_EMAIL] == mock_config_entry.data[CONF_EMAIL]
+
+    def test_ignores_current_token(
+        self, mock_hass: Mock, mock_session: Mock, mock_config_entry: Mock
+    ) -> None:
+        """The token already stored is not written again."""
+        coordinator = SabianaTokenCoordinator(
+            mock_hass, mock_session, mock_config_entry
+        )
+        coordinator.store_rotated_long_jwt(mock_config_entry.data[CONF_LONG_JWT])
+        mock_hass.config_entries.async_update_entry.assert_not_called()
+
+    def test_ignores_token_without_expiry(
+        self, mock_hass: Mock, mock_session: Mock, mock_config_entry: Mock
+    ) -> None:
+        """A token whose exp cannot be read keeps the current long JWT."""
+        coordinator = SabianaTokenCoordinator(
+            mock_hass, mock_session, mock_config_entry
+        )
+        coordinator.store_rotated_long_jwt("not-a-jwt-at-all")
+        mock_hass.config_entries.async_update_entry.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Device coordinator (getDeviceForUserV2 + Socket.IO events)
+# ---------------------------------------------------------------------------
+
+FRAME_500D_WORDS = (
+    "500d",
+    "002b",
+    "0400",
+    "01c4",
+    "0001",
+    "0124",
+    "00f5",
+    "0104",
+    "00dc",
+    "c800",
+    "c800",
+    "0000",
+    "0000",
+    "467b",
+    "002b",
+    "0000",
+    "0004",
+    "0000",
+    "0000",
+    "0000",
+)
+FRAME_500D_OFF = "".join(FRAME_500D_WORDS)
+# Same unit switched on (word 4 bit 0 set) in heating (word 3 = 0401).
+FRAME_500D_ON = FRAME_500D_OFF[:8] + "040101c5" + FRAME_500D_OFF[16:]
+STATUS_RSSI = -80
+
+
+def _jwt(exp: int) -> str:
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256"}').decode().rstrip("=")
+    payload = (
+        base64.urlsafe_b64encode(json.dumps({"exp": exp, "sub": "renew"}).encode())
+        .decode()
+        .rstrip("=")
+    )
+    return f"{header}.{payload}.signature"
+
+
+def _device(device_id: str = "swm-1", **kwargs: object) -> SabianaDevice:
+    return api.parse_device(
+        {
+            "idDevice": device_id,
+            "deviceStateModelType": "cvp",
+            "lastData": FRAME_500D_OFF,
+            "connectionUp": True,
+            **kwargs,
+        }
+    )
+
+
+def _device_list(
+    *devices: SabianaDevice, token: str | None = None
+) -> SabianaDeviceList:
+    return SabianaDeviceList(
+        devices={d.id: d for d in devices},
+        last_fw={"cvp": "0.45"},
+        rotated_token=token,
+    )
+
+
+@pytest.fixture
+def token_coordinator() -> Mock:
+    """Create a mock token coordinator."""
+    coordinator = Mock()
+    coordinator.async_request_refresh = AsyncMock()
+    coordinator.short_jwt = JWT(token="short-token", expire_at=datetime.now(UTC))  # noqa: S106
+    return coordinator
+
+
+@pytest.fixture
+def websocket_manager() -> Mock:
+    """Create a mock WebSocket manager that records registered callbacks."""
+    manager = Mock()
+    manager.connected = False
+    return manager
+
+
+@pytest.fixture
+def device_coordinator(
+    mock_hass: Mock,
+    mock_session: Mock,
+    mock_config_entry: Mock,
+    token_coordinator: Mock,
+    websocket_manager: Mock,
+) -> SabianaDeviceCoordinator:
+    """Create a device coordinator whose updates are applied synchronously."""
+    mock_hass.config_entries.async_schedule_reload = Mock()
+    coordinator = SabianaDeviceCoordinator(
+        mock_hass,
+        mock_session,
+        token_coordinator,
+        mock_config_entry,
+        websocket_manager=websocket_manager,
+    )
+
+    def set_data(data: dict[str, SabianaDevice]) -> None:
+        coordinator.data = data
+
+    coordinator.async_set_updated_data = Mock(side_effect=set_data)
+    return coordinator
+
+
+class TestSabianaDeviceCoordinatorUpdate:
+    """Tests for the REST read of the device list."""
+
+    @pytest.mark.asyncio
+    async def test_returns_device_records(
+        self, device_coordinator: SabianaDeviceCoordinator, token_coordinator: Mock
+    ) -> None:
+        """The data is the device list keyed by idDevice; lastFw is kept."""
+        device = _device()
+        with patch.object(
+            api, "async_get_devices", AsyncMock(return_value=_device_list(device))
+        ) as get_devices:
+            data = await device_coordinator._async_update_data()
+
+        token_coordinator.async_request_refresh.assert_awaited_once()
+        assert get_devices.await_args.args[1] == "short-token"
+        assert data == {"swm-1": device}
+        assert device_coordinator.last_fw == {"cvp": "0.45"}
+        assert device_coordinator.device_ids == {"swm-1"}
+
+    @pytest.mark.asyncio
+    async def test_stores_rotated_token(
+        self, device_coordinator: SabianaDeviceCoordinator, token_coordinator: Mock
+    ) -> None:
+        """A token in the envelope is handed to the token coordinator."""
+        with patch.object(
+            api,
+            "async_get_devices",
+            AsyncMock(return_value=_device_list(_device(), token="rotated")),  # noqa: S106
+        ):
+            await device_coordinator._async_update_data()
+        token_coordinator.store_rotated_long_jwt.assert_called_once_with("rotated")
+
+    @pytest.mark.asyncio
+    async def test_reloads_when_device_set_changes(
+        self, device_coordinator: SabianaDeviceCoordinator, mock_hass: Mock
+    ) -> None:
+        """A device added to the account triggers a reload, not the first read."""
+        reload = mock_hass.config_entries.async_schedule_reload
+        responses = [
+            _device_list(_device("swm-1")),
+            _device_list(_device("swm-1", deviceName="renamed")),
+            _device_list(_device("swm-1"), _device("swm-2")),
+        ]
+        with patch.object(api, "async_get_devices", AsyncMock(side_effect=responses)):
+            await device_coordinator._async_update_data()
+            await device_coordinator._async_update_data()
+            reload.assert_not_called()
+            await device_coordinator._async_update_data()
+
+        reload.assert_called_once_with("test_entry_id")
+        assert device_coordinator.device_ids == {"swm-1", "swm-2"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            api.SabianaApiAuthError("auth"),
+            api.SabianaApiClientError("api"),
+            httpx.ConnectError("down"),
+        ],
+    )
+    async def test_errors_raise_update_failed(
+        self, device_coordinator: SabianaDeviceCoordinator, error: Exception
+    ) -> None:
+        """API and network errors become UpdateFailed."""
+        with (
+            patch.object(api, "async_get_devices", AsyncMock(side_effect=error)),
+            pytest.raises(UpdateFailed),
+        ):
+            await device_coordinator._async_update_data()
+
+
+class TestSabianaDeviceCoordinatorWebSocketEvents:
+    """Socket.IO events applied to the device records."""
+
+    def test_no_polling(self, device_coordinator: SabianaDeviceCoordinator) -> None:
+        """The app never reads the list on a timer."""
+        assert device_coordinator.update_interval is None
+
+    def test_connection_status_updates_entities(
+        self, device_coordinator: SabianaDeviceCoordinator
+    ) -> None:
+        """Socket up/down changes availability: listeners are notified."""
+        with patch.object(device_coordinator, "async_update_listeners") as update:
+            device_coordinator._handle_ws_connection_status(connected=False)
+            device_coordinator._handle_ws_connection_status(connected=True)
+        assert update.call_count == 2  # noqa: PLR2004
+        assert device_coordinator.update_interval is None
+
+    def test_realtime_connected_follows_the_socket(
+        self,
+        device_coordinator: SabianaDeviceCoordinator,
+        websocket_manager: Mock,
+    ) -> None:
+        """realtime_connected mirrors the WebSocket manager."""
+        websocket_manager.connected = True
+        assert device_coordinator.realtime_connected is True
+        websocket_manager.connected = False
+        assert device_coordinator.realtime_connected is False
+
+    @pytest.mark.usefixtures("device_coordinator")
+    def test_registers_all_callbacks(self, websocket_manager: Mock) -> None:
+        """data, connEvents, status, appMsg refresh and connection status."""
+        websocket_manager.register_device_update_callback.assert_called_once()
+        websocket_manager.register_connection_event_callback.assert_called_once()
+        websocket_manager.register_status_callback.assert_called_once()
+        websocket_manager.register_refresh_callback.assert_called_once()
+        websocket_manager.register_connection_status_callback.assert_called_once()
+
+    def test_data_event_decodes_and_forces_online(
+        self, device_coordinator: SabianaDeviceCoordinator
+    ) -> None:
+        """A frame replaces lastData and state and sets connectionUp."""
+        device_coordinator.data = {"swm-1": _device(connectionUp=False)}
+        device_coordinator._handle_ws_data(
+            WebSocketDeviceUpdate(device_id="swm-1", data=FRAME_500D_ON)
+        )
+        device = device_coordinator.data["swm-1"]
+        assert device.last_data == FRAME_500D_ON
+        assert device.connection_up is True
+        assert device.state is not None
+        assert (device.state.on, device.state.mode) == (True, 1)
+        assert device.controllable is True
+
+    def test_unchanged_frame_on_online_device_is_ignored(
+        self, device_coordinator: SabianaDeviceCoordinator
+    ) -> None:
+        """Same frame, already online: no listener update."""
+        device_coordinator.data = {"swm-1": _device()}
+        device_coordinator._handle_ws_data(
+            WebSocketDeviceUpdate(device_id="swm-1", data=FRAME_500D_OFF)
+        )
+        device_coordinator.async_set_updated_data.assert_not_called()
+
+    def test_unknown_device_is_ignored(
+        self, device_coordinator: SabianaDeviceCoordinator
+    ) -> None:
+        """Events for devices not in the list are dropped."""
+        device_coordinator.data = {"swm-1": _device()}
+        device_coordinator._handle_ws_data(
+            WebSocketDeviceUpdate(device_id="other", data=FRAME_500D_ON)
+        )
+        device_coordinator.async_set_updated_data.assert_not_called()
+
+    def test_invalid_frame_keeps_state_but_marks_invalid(
+        self, device_coordinator: SabianaDeviceCoordinator
+    ) -> None:
+        """A DATA-ERROR frame blocks control but keeps the last decoding."""
+        previous = _device()
+        device_coordinator.data = {"swm-1": previous}
+        device_coordinator._handle_ws_data(
+            WebSocketDeviceUpdate(device_id="swm-1", data="999999")
+        )
+        device = device_coordinator.data["swm-1"]
+        assert device.state == previous.state
+        assert device.data_valid is False
+        assert device.controllable is False
+
+    def test_conn_event_toggles_connection(
+        self, device_coordinator: SabianaDeviceCoordinator
+    ) -> None:
+        """A connEvents event sets connectionUp; a repeated value is a no-op."""
+        device_coordinator.data = {"swm-1": _device()}
+        device_coordinator._handle_ws_conn_event(
+            WebSocketConnectionEvent(device_id="swm-1", connected=False)
+        )
+        assert device_coordinator.data["swm-1"].connection_up is False
+
+        device_coordinator.async_set_updated_data.reset_mock()
+        device_coordinator._handle_ws_conn_event(
+            WebSocketConnectionEvent(device_id="swm-1", connected=False)
+        )
+        device_coordinator.async_set_updated_data.assert_not_called()
+
+    def test_status_event_updates_firmware_and_rssi(
+        self, device_coordinator: SabianaDeviceCoordinator
+    ) -> None:
+        """A status event sets deviceStateFw and deviceWiFiRSSI."""
+        device_coordinator.data = {"swm-1": _device()}
+        device_coordinator._handle_ws_status(
+            WebSocketStatusEvent(
+                device_id="swm-1", wifi_fw="1.30", wifi_rssi=STATUS_RSSI
+            )
+        )
+        device = device_coordinator.data["swm-1"]
+        assert (device.wifi_fw, device.wifi_rssi) == ("1.30", STATUS_RSSI)
+        assert (device.wifi_signal, device.wifi_weak) == (2, True)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_unregisters_callbacks(
+        self, device_coordinator: SabianaDeviceCoordinator, websocket_manager: Mock
+    ) -> None:
+        """Every registered callback is removed on shutdown."""
+        unregister = websocket_manager.register_status_callback.return_value
+        with patch(
+            "homeassistant.helpers.update_coordinator.DataUpdateCoordinator.async_shutdown",
+            AsyncMock(),
+        ):
+            await device_coordinator.async_shutdown()
+        unregister.assert_called_once()
+
+
+class TestSabianaTokenCoordinatorLogging:
+    """Secrets stay out of the logs."""
+
+    @pytest.mark.asyncio
+    async def test_debug_log_redacts_password_and_tokens(
+        self,
+        mock_hass: Mock,
+        mock_session: Mock,
+        mock_config_entry: Mock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The config entry dump hides password and JWTs, keeps the rest."""
+        caplog.set_level(logging.DEBUG)
+        coordinator = SabianaTokenCoordinator(
+            mock_hass, mock_session, mock_config_entry
+        )
+        await coordinator._async_update_data()
+
+        data = mock_config_entry.data
+        assert "Config entry data" in caplog.text
+        for secret in (data[CONF_PASSWORD], data[CONF_SHORT_JWT], data[CONF_LONG_JWT]):
+            assert secret not in caplog.text
+        assert data[CONF_EMAIL] in caplog.text
+        assert "**REDACTED**" in caplog.text

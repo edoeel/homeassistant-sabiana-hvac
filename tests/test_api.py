@@ -4,7 +4,6 @@
 
 import base64
 import json
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock, patch
@@ -17,8 +16,7 @@ from custom_components.sabiana_hvac.api import (
     SabianaApiAuthError,
     SabianaApiClientError,
     SabianaDevice,
-    _decode_swing_mode,
-    decode_last_data,
+    SabianaDeviceList,
 )
 from custom_components.sabiana_hvac.const import BASE_URL, USER_AGENT
 from custom_components.sabiana_hvac.models import JWT
@@ -28,15 +26,12 @@ if TYPE_CHECKING:
 
 EXPECTED_DEVICE_COUNT = 2
 
-# Expected temperature values for decode_last_data assertions
-TEMP_22_5 = 22.5
-TEMP_30_0 = 30.0
-TEMP_35_0 = 35.0
-TEMP_18_0 = 18.0
-TEMP_20_0 = 20.0
-TEMP_21_5 = 21.5
-TEMP_24_0 = 24.0
-TEMP_26_0 = 26.0
+# Real Carisma Fly 500D frame from issue #88 (unit off, night mode on).
+FRAME_500D_OFF = (
+    "500d002b040001c40001012400f5010400dcc800c80000000000467b002b00000004000000000000"
+)
+ROTATED_TOKEN = "a.rotated-long-jwt.signature"  # noqa: S105
+WIFI_RSSI = -65
 
 
 class TestSabianaApiClientError:
@@ -388,82 +383,188 @@ class TestExtractRenewedToken:
         assert result.token == sample_short_jwt_token
 
 
-class TestExtractDevices:
-    """Tests for extract_devices function."""
+class TestExtractRotatedToken:
+    """Tests for extract_rotated_token (app: checkResponse)."""
 
-    def test_extract_devices_returns_list_of_devices(self) -> None:
-        """Test that extract_devices returns list of devices."""
+    def test_returns_token_on_success(self) -> None:
+        """A token longer than 10 chars next to status 0 is returned."""
+        data = {"status": 0, "body": {}, "token": ROTATED_TOKEN}
+        assert api.extract_rotated_token(data) == ROTATED_TOKEN
+
+    def test_ignores_short_token(self) -> None:
+        """Tokens of 10 characters or less are ignored, as in the app."""
+        assert api.extract_rotated_token({"status": 0, "token": "0123456789"}) is None
+
+    def test_ignores_token_on_error_status(self) -> None:
+        """A token on an error response is ignored."""
+        data = {"status": 5, "token": ROTATED_TOKEN}
+        assert api.extract_rotated_token(data) is None
+
+    def test_returns_none_when_missing_or_not_a_string(self) -> None:
+        """A missing or non-string token yields None."""
+        assert api.extract_rotated_token({"status": 0}) is None
+        assert api.extract_rotated_token({"status": 0, "token": 12345678901}) is None
+
+
+class TestParseDevice:
+    """Tests for parse_device (one entry of getDeviceForUserV2 body.devices)."""
+
+    def test_parses_all_server_fields(self) -> None:
+        """Every field the app reads from the server is mapped."""
+        device = api.parse_device(
+            {
+                "idDevice": "swm-1",
+                "deviceName": "Soggiorno",
+                "deviceGroupId": "g1",
+                "deviceGroupName": "Casa",
+                "deviceGroupShared": True,
+                "deviceStateModelType": "cvp",
+                "lastData": FRAME_500D_OFF,
+                "connectionUp": True,
+                "deviceStateFw": "1.23",
+                "deviceWiFiRSSI": WIFI_RSSI,
+                "fromShare": True,
+                "fromGroupShare": False,
+                "fwUpdateRequest": "1.24",
+                "deviceTimeZone": "Europe/Rome",
+            }
+        )
+        assert device.id == "swm-1"
+        assert device.name == "Soggiorno"
+        assert device.group_id == "g1"
+        assert device.group_name == "Casa"
+        assert device.group_shared is True
+        assert device.model_type == "cvp"
+        assert device.last_data == FRAME_500D_OFF
+        assert device.connection_up is True
+        assert device.wifi_fw == "1.23"
+        assert device.wifi_rssi == WIFI_RSSI
+        assert device.from_share is True
+        assert device.from_group_share is False
+        assert device.fw_update_request == "1.24"
+        assert device.time_zone == "Europe/Rome"
+        assert device.data_valid is True
+        assert device.state is not None
+        assert device.state.controller_model == "500D"
+        assert device.controllable is True
+
+    def test_name_falls_back_to_id(self) -> None:
+        """A unit never renamed has no deviceName: the app shows idDevice."""
+        device = api.parse_device({"idDevice": "swm-1", "deviceName": ""})
+        assert device.name == "swm-1"
+
+    def test_missing_connection_up_is_unknown(self) -> None:
+        """A missing connectionUp field is kept as None and treated as online."""
+        device = api.parse_device({"idDevice": "swm-1", "lastData": FRAME_500D_OFF})
+        assert device.connection_up is None
+        assert device.online is True
+
+    def test_offline_device_is_not_controllable(self) -> None:
+        """An offline device (connectionUp false) cannot be controlled."""
+        device = api.parse_device(
+            {"idDevice": "swm-1", "lastData": FRAME_500D_OFF, "connectionUp": False}
+        )
+        assert device.online is False
+        assert device.controllable is False
+
+    @pytest.mark.parametrize(
+        "last_data",
+        [None, "", "0123456789", "999999", "0" * 16 + "1234" * 13],
+    )
+    def test_invalid_last_data_is_not_controllable(self, last_data: str | None) -> None:
+        """Missing, short and DATA-ERROR frames mark the data as not valid."""
+        device = api.parse_device(
+            {"idDevice": "swm-1", "lastData": last_data, "connectionUp": True}
+        )
+        assert device.data_valid is False
+        assert device.state is None
+        assert device.controllable is False
+
+    def test_rvu_is_validated_but_not_decoded(self) -> None:
+        """RVU frames are not fancoil frames: no state, but validity is kept."""
+        device = api.parse_device(
+            {
+                "idDevice": "swm-rvu",
+                "deviceStateModelType": "rvu",
+                "lastData": "5400" + "0001" * 23,
+                "connectionUp": True,
+            }
+        )
+        assert device.is_rvu is True
+        assert device.data_valid is True
+        assert device.state is None
+        assert device.controllable is False
+
+    def test_rssi_accepts_numeric_strings(self) -> None:
+        """The deviceWiFiRSSI field is converted like JS Number()."""
+        assert api.parse_device(
+            {"idDevice": "a", "deviceWiFiRSSI": "-65"}
+        ).wifi_rssi == (WIFI_RSSI)
+        assert (
+            api.parse_device({"idDevice": "a", "deviceWiFiRSSI": "x"}).wifi_rssi is None
+        )
+
+
+class TestParseDeviceList:
+    """Tests for parse_device_list (getDeviceForUserV2 response)."""
+
+    def test_parses_devices_last_fw_and_token(self) -> None:
+        """Devices are keyed and sorted by idDevice; lastFw and token are read."""
         data = {
+            "status": 0,
+            "token": ROTATED_TOKEN,
             "body": {
                 "devices": [
-                    {"idDevice": "device1", "deviceName": "Device 1"},
-                    {"idDevice": "device2", "deviceName": "Device 2"},
+                    {"idDevice": "swm-b", "deviceName": "B"},
+                    {"idDevice": "swm-a", "deviceName": "A"},
+                ],
+                "lastFw": [
+                    {"type": "evo", "version": "1.23"},
+                    {"type": "cvp", "version": "0.45"},
                 ],
             },
         }
-        devices = api.extract_devices(data)
-        assert len(devices) == EXPECTED_DEVICE_COUNT
-        assert isinstance(devices[0], SabianaDevice)
-        assert devices[0].id == "device1"
-        assert devices[0].name == "Device 1"
-        assert devices[1].id == "device2"
-        assert devices[1].name == "Device 2"
+        result = api.parse_device_list(data)
+        assert isinstance(result, SabianaDeviceList)
+        assert list(result.devices) == ["swm-a", "swm-b"]
+        assert all(isinstance(d, SabianaDevice) for d in result.devices.values())
+        assert result.last_fw == {"evo": "1.23", "cvp": "0.45"}
+        assert result.rotated_token == ROTATED_TOKEN
 
-    def test_extract_devices_returns_empty_list_when_no_devices(self) -> None:
-        """Test that extract_devices returns empty list when no devices."""
-        data = {"body": {"devices": []}}
-        devices = api.extract_devices(data)
-        assert devices == []
+    def test_empty_device_list_is_valid(self) -> None:
+        """An account without devices is a valid answer."""
+        result = api.parse_device_list({"body": {"devices": [], "lastFw": []}})
+        assert (result.devices, result.last_fw, result.rotated_token) == ({}, {}, None)
 
-    def test_extract_devices_returns_empty_list_when_body_missing(self) -> None:
-        """Test that extract_devices returns empty list when body is missing."""
-        data: dict[str, Any] = {}
-        devices = api.extract_devices(data)
-        assert devices == []
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {},
+            {"body": None},
+            {"body": {}},
+            {"body": {"devices": []}},  # no lastFw
+            {"body": {"lastFw": []}},  # no devices
+            {"body": {"devices": None, "lastFw": []}},
+            {"body": {"devices": [{"deviceName": "x"}], "lastFw": []}},
+            {"body": {"devices": [{"idDevice": 12}], "lastFw": []}},
+            {"body": {"devices": ["swm-a"], "lastFw": []}},
+            {"body": {"devices": [], "lastFw": [None]}},
+        ],
+    )
+    def test_malformed_body_fails_the_read(self, data: dict[str, Any]) -> None:
+        """The app fails on these shapes and keeps its previous list."""
+        with pytest.raises(SabianaApiClientError, match="Malformed"):
+            api.parse_device_list(data)
 
-    def test_extract_devices_returns_empty_list_when_devices_missing(self) -> None:
-        """Test that extract_devices returns empty list when devices is missing."""
-        data = {"body": {}}
-        devices = api.extract_devices(data)
-        assert devices == []
-
-    def test_extract_devices_uses_id_when_device_name_missing(self) -> None:
-        """Test extract_devices falls back to idDevice when deviceName is absent."""
+    def test_ignores_malformed_last_fw(self) -> None:
+        """Entries of lastFw without string type and version are ignored."""
         data = {
             "body": {
-                "devices": [
-                    {"idDevice": "device1", "deviceName": "Device 1"},
-                    {"idDevice": "device2"},
-                ],
-            },
+                "devices": [],
+                "lastFw": [{"type": "evo"}, {"type": 1, "version": "2"}],
+            }
         }
-        devices = api.extract_devices(data)
-        assert devices[1].id == "device2"
-        assert devices[1].name == "device2"
-
-
-class TestExtractResult:
-    """Tests for extract_result function."""
-
-    def test_extract_result_returns_true_when_result_is_true(self) -> None:
-        """Test that extract_result returns True when result is True."""
-        data = {"body": {"result": True}}
-        assert api.extract_result(data) is True
-
-    def test_extract_result_returns_false_when_result_is_false(self) -> None:
-        """Test that extract_result returns False when result is False."""
-        data = {"body": {"result": False}}
-        assert api.extract_result(data) is False
-
-    def test_extract_result_returns_false_when_result_missing(self) -> None:
-        """Test that extract_result returns False when result is missing."""
-        data = {"body": {}}
-        assert api.extract_result(data) is False
-
-    def test_extract_result_returns_false_when_body_missing(self) -> None:
-        """Test that extract_result returns False when body is missing."""
-        data: dict[str, Any] = {}
-        assert api.extract_result(data) is False
+        assert api.parse_device_list(data).last_fw == {}
 
 
 class TestCreateSessionClient:
@@ -575,11 +676,15 @@ class TestAsyncGetDevices:
             json=sample_devices_response,
         )
         async with httpx.AsyncClient() as session:
-            devices = await api.async_get_devices(session, sample_short_jwt_token)
-            assert len(devices) == EXPECTED_DEVICE_COUNT
-            assert isinstance(devices[0], SabianaDevice)
-            assert devices[0].id == "device1"
-            assert devices[0].name == "Device 1"
+            result = await api.async_get_devices(session, sample_short_jwt_token)
+            assert isinstance(result, SabianaDeviceList)
+            assert len(result.devices) == EXPECTED_DEVICE_COUNT
+            assert result.devices["device1"].name == "Device 1"
+            assert result.devices["device2"].name == "Device 2"
+
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert request.headers["auth"] == sample_short_jwt_token
 
     @pytest.mark.asyncio
     async def test_async_get_devices_raises_auth_error_on_http_401(
@@ -673,13 +778,13 @@ class TestAsyncSendCommand:
     """Tests for async_send_command function."""
 
     @pytest.mark.asyncio
-    async def test_async_send_command_returns_true_on_success(
+    async def test_async_send_command_posts_the_app_payload(
         self,
         httpx_mock: HTTPXMock,
         sample_send_command_response: dict[str, Any],
         sample_short_jwt_token: str,
     ) -> None:
-        """Test that async_send_command returns True on success."""
+        """The request matches the app: start 2304, restart false, auth header."""
         httpx_mock.add_response(
             url=f"{BASE_URL}/devices/cmd",
             method="POST",
@@ -690,30 +795,36 @@ class TestAsyncSendCommand:
                 session,
                 sample_short_jwt_token,
                 "device1",
-                "command_data",
+                "040100D7FF00FFFF0000",
             )
-            assert result is True
+        assert result == sample_send_command_response
+
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert request.headers["auth"] == sample_short_jwt_token
+        assert json.loads(request.content) == {
+            "deviceID": "device1",
+            "start": 2304,
+            "data": "040100D7FF00FFFF0000",
+            "restart": False,
+        }
 
     @pytest.mark.asyncio
-    async def test_async_send_command_returns_false_on_failure(
+    async def test_async_send_command_ignores_body_result(
         self,
         httpx_mock: HTTPXMock,
         sample_short_jwt_token: str,
     ) -> None:
-        """Test that async_send_command returns False on failure."""
+        """Status 0 is success even with result false: the app ignores body."""
+        response = {"status": 0, "body": {"result": False}, "token": ROTATED_TOKEN}
         httpx_mock.add_response(
-            url=f"{BASE_URL}/devices/cmd",
-            method="POST",
-            json={"status": 0, "body": {"result": False}},
+            url=f"{BASE_URL}/devices/cmd", method="POST", json=response
         )
         async with httpx.AsyncClient() as session:
             result = await api.async_send_command(
-                session,
-                sample_short_jwt_token,
-                "device1",
-                "command_data",
+                session, sample_short_jwt_token, "device1", "040100D7FF00FFFF0000"
             )
-            assert result is False
+        assert api.extract_rotated_token(result) == ROTATED_TOKEN
 
     @pytest.mark.asyncio
     async def test_async_send_command_raises_auth_error_on_http_401(
@@ -757,372 +868,3 @@ class TestAsyncSendCommand:
                     "device1",
                     "command_data",
                 )
-
-
-# ---------------------------------------------------------------------------
-# Helpers for decode_last_data tests
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _HexFields:
-    """Fields for building a lastData hex string.
-
-    Byte layout:
-      Word 1 (0-1):   model
-      Word 2 (2-3):   unknown1
-      Word 3 (4-5):   fan + mode
-      Word 4 (6-7):   unknown2 + power/sleep
-      Word 5 (8-9):   flap_pos + flap_present
-      Word 6 (10-11): current_temp_raw  (x10)
-      Word 7 (12-13): summer_sp_raw     (x10)
-      Word 8 (14-15): winter_sp_raw     (x10)
-      Word 9 (16-17): auto_sp_raw       (x10)
-    """
-
-    model: str = "5004"
-    unknown1: str = "0000"
-    fan: int = 0x04
-    mode: int = 0x01
-    unknown2: int = 0x00
-    power: int = 0x01
-    flap_pos: int = 0
-    flap_present: int = 0
-    current_temp_raw: int = 225
-    summer_sp_raw: int = 220
-    winter_sp_raw: int = 220
-    auto_sp_raw: int = 220
-
-
-def _build_hex(**kwargs: str | int) -> str:
-    """Build a lastData hex string from field values."""
-    f = _HexFields(**kwargs)
-    return (
-        f.model
-        + f.unknown1
-        + f"{f.fan:02x}{f.mode:02x}"
-        + f"{f.unknown2:02x}{f.power:02x}"
-        + f"{f.flap_pos:02x}{f.flap_present:02x}"
-        + f"{f.current_temp_raw:04x}"
-        + f"{f.summer_sp_raw:04x}"
-        + f"{f.winter_sp_raw:04x}"
-        + f"{f.auto_sp_raw:04x}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# decode_last_data tests
-# ---------------------------------------------------------------------------
-
-
-class TestDecodeLastDataCurrentTemperature:
-    """Tests for current temperature decoding (16-bit word 6, bytes 10-11)."""
-
-    def test_current_temp_normal_range(self) -> None:
-        """Current temperature within single-byte range (≤ 25.5°C)."""
-        hex_data = _build_hex(current_temp_raw=225)  # 22.5°C
-        state = decode_last_data(hex_data)
-        assert state.current_temperature == TEMP_22_5
-
-    def test_current_temp_above_255(self) -> None:
-        """Current temperature > 25.5°C requires 16-bit decoding."""
-        hex_data = _build_hex(current_temp_raw=300)  # 30.0°C
-        state = decode_last_data(hex_data)
-        assert state.current_temperature == TEMP_30_0
-
-    def test_current_temp_high_value(self) -> None:
-        """Current temperature at 35.0°C (350 raw)."""
-        hex_data = _build_hex(current_temp_raw=350)  # 35.0°C
-        state = decode_last_data(hex_data)
-        assert state.current_temperature == TEMP_35_0
-
-    def test_current_temp_zero_returns_none(self) -> None:
-        """Zero current temperature returns None."""
-        hex_data = _build_hex(current_temp_raw=0)
-        state = decode_last_data(hex_data)
-        assert state.current_temperature is None
-
-    def test_current_temp_fractional(self) -> None:
-        """Current temperature 28.3°C (283 raw)."""
-        hex_data = _build_hex(current_temp_raw=283)  # 28.3°C
-        state = decode_last_data(hex_data)
-        assert state.current_temperature == pytest.approx(28.3, abs=0.01)
-
-
-class TestDecodeLastDataTargetTemperature:
-    """Tests for mode-aware target temperature decoding."""
-
-    def test_cool_mode_reads_summer_setpoint(self) -> None:
-        """Cool mode (0) reads summer setpoint from bytes 12-13."""
-        hex_data = _build_hex(
-            mode=0x00,  # Cool / Summer
-            summer_sp_raw=240,  # 24.0°C
-            winter_sp_raw=180,  # 18.0°C — should NOT be read
-            auto_sp_raw=200,  # 20.0°C — should NOT be read
-        )
-        state = decode_last_data(hex_data)
-        assert state.target_temperature == TEMP_24_0
-
-    def test_heat_mode_reads_winter_setpoint(self) -> None:
-        """Heat mode (1) reads winter setpoint from bytes 14-15."""
-        hex_data = _build_hex(
-            mode=0x01,  # Heat / Winter
-            summer_sp_raw=240,  # 24.0°C — should NOT be read
-            winter_sp_raw=180,  # 18.0°C
-            auto_sp_raw=200,  # 20.0°C — should NOT be read
-        )
-        state = decode_last_data(hex_data)
-        assert state.target_temperature == TEMP_18_0
-
-    def test_auto_mode_reads_auto_setpoint(self) -> None:
-        """Auto mode (2) reads auto setpoint from bytes 16-17."""
-        hex_data = _build_hex(
-            mode=0x02,  # Auto
-            summer_sp_raw=240,  # 24.0°C — should NOT be read
-            winter_sp_raw=180,  # 18.0°C — should NOT be read
-            auto_sp_raw=215,  # 21.5°C
-        )
-        state = decode_last_data(hex_data)
-        assert state.target_temperature == TEMP_21_5
-
-    def test_fan_only_mode_falls_back_to_winter(self) -> None:
-        """Fan only mode (3) falls back to winter setpoint."""
-        hex_data = _build_hex(
-            mode=0x03,  # Fan only
-            summer_sp_raw=240,
-            winter_sp_raw=180,
-            auto_sp_raw=200,
-        )
-        state = decode_last_data(hex_data)
-        assert state.target_temperature == TEMP_18_0
-
-    def test_cool_and_heat_have_different_setpoints(self) -> None:
-        """Verify cool and heat modes read independent setpoints."""
-        cool_hex = _build_hex(mode=0x00, summer_sp_raw=260, winter_sp_raw=200)
-        heat_hex = _build_hex(mode=0x01, summer_sp_raw=260, winter_sp_raw=200)
-
-        cool_state = decode_last_data(cool_hex)
-        heat_state = decode_last_data(heat_hex)
-
-        assert cool_state.target_temperature == TEMP_26_0  # summer
-        assert heat_state.target_temperature == TEMP_20_0  # winter
-
-
-class TestDecodeLastDataSwingMode:
-    """Tests for swing/flap mode decoding (word 5, bytes 8-9)."""
-
-    def test_flap_present_position_horizontal(self) -> None:
-        """Flap present with position 1 → 'Horizontal'."""
-        hex_data = _build_hex(flap_pos=1, flap_present=1)
-        state = decode_last_data(hex_data)
-        assert state.swing_mode == "Horizontal"
-
-    def test_flap_present_position_45_degrees(self) -> None:
-        """Flap present with position 2 → '45 Degrees'."""
-        hex_data = _build_hex(flap_pos=2, flap_present=1)
-        state = decode_last_data(hex_data)
-        assert state.swing_mode == "45 Degrees"
-
-    def test_flap_present_position_vertical(self) -> None:
-        """Flap present with position 3 → 'Vertical'."""
-        hex_data = _build_hex(flap_pos=3, flap_present=1)
-        state = decode_last_data(hex_data)
-        assert state.swing_mode == "Vertical"
-
-    def test_flap_present_position_swing(self) -> None:
-        """Flap present with position 4 → 'Swing'."""
-        hex_data = _build_hex(flap_pos=4, flap_present=1)
-        state = decode_last_data(hex_data)
-        assert state.swing_mode == "Swing"
-
-    def test_flap_present_position_standard_returns_none(self) -> None:
-        """Flap present with position 0 (Standard) → None (not in modes list)."""
-        hex_data = _build_hex(flap_pos=0, flap_present=1)
-        state = decode_last_data(hex_data)
-        assert state.swing_mode is None
-
-    def test_flap_not_present_returns_none(self) -> None:
-        """Flap not present (flag=0) → None regardless of position."""
-        hex_data = _build_hex(flap_pos=4, flap_present=0)
-        state = decode_last_data(hex_data)
-        assert state.swing_mode is None
-
-    def test_flap_unknown_present_value_returns_none(self) -> None:
-        """Flap present flag not 1 (e.g. 2) → None."""
-        hex_data = _build_hex(flap_pos=4, flap_present=2)
-        state = decode_last_data(hex_data)
-        assert state.swing_mode is None
-
-
-class TestDecodeSwingModeFunction:
-    """Unit tests for _decode_swing_mode helper."""
-
-    def test_all_positions(self) -> None:
-        """Each valid position maps to correct swing mode name."""
-        assert _decode_swing_mode(1, 1) == "Horizontal"
-        assert _decode_swing_mode(2, 1) == "45 Degrees"
-        assert _decode_swing_mode(3, 1) == "Vertical"
-        assert _decode_swing_mode(4, 1) == "Swing"
-
-    def test_position_zero_returns_none(self) -> None:
-        """Position 0 (Standard) returns None."""
-        assert _decode_swing_mode(0, 1) is None
-
-    def test_not_present_returns_none(self) -> None:
-        """Flap not present returns None."""
-        assert _decode_swing_mode(4, 0) is None
-
-    def test_unknown_position_returns_none(self) -> None:
-        """Unknown position value returns None."""
-        assert _decode_swing_mode(5, 1) is None
-        assert _decode_swing_mode(255, 1) is None
-
-
-class TestDecodeLastDataHvacMode:
-    """Tests for HVAC mode decoding including the DRY→AUTO fix."""
-
-    def test_mode_0_is_cool(self) -> None:
-        """Mode byte 0 decodes to 'cool'."""
-        hex_data = _build_hex(mode=0x00)
-        state = decode_last_data(hex_data)
-        assert state.hvac_mode == "cool"
-
-    def test_mode_1_is_heat(self) -> None:
-        """Mode byte 1 decodes to 'heat'."""
-        hex_data = _build_hex(mode=0x01)
-        state = decode_last_data(hex_data)
-        assert state.hvac_mode == "heat"
-
-    def test_mode_2_is_auto(self) -> None:
-        """Mode byte 2 decodes to 'auto' (not 'dry')."""
-        hex_data = _build_hex(mode=0x02)
-        state = decode_last_data(hex_data)
-        assert state.hvac_mode == "auto"
-
-    def test_mode_3_is_fan_only(self) -> None:
-        """Mode byte 3 decodes to 'fan_only'."""
-        hex_data = _build_hex(mode=0x03)
-        state = decode_last_data(hex_data)
-        assert state.hvac_mode == "fan_only"
-
-    def test_power_off_overrides_mode(self) -> None:
-        """Power off (byte 7 bit 0 = 0) overrides mode to 'off'."""
-        hex_data = _build_hex(mode=0x01, power=0x00)
-        state = decode_last_data(hex_data)
-        assert state.hvac_mode == "off"
-        assert state.power_on is False
-
-    def test_power_off_with_auto_available_overrides_mode(self) -> None:
-        """Power off with auto available (byte 7 = 0x04) overrides mode to 'off'."""
-        hex_data = _build_hex(mode=0x01, power=0x04)
-        state = decode_last_data(hex_data)
-        assert state.hvac_mode == "off"
-        assert state.power_on is False
-
-
-class TestDecodeLastDataAutoModeAvailable:
-    """Tests for auto mode availability flag (bit 2 of byte 7)."""
-
-    def test_auto_mode_not_available_default(self) -> None:
-        """Default power=0x01 has bit 2 clear → auto mode not available."""
-        hex_data = _build_hex(power=0x01)
-        state = decode_last_data(hex_data)
-        assert state.auto_mode_available is False
-
-    def test_auto_mode_available_when_bit2_set(self) -> None:
-        """Power byte 0x05 (bit 0 + bit 2) → power on + auto mode available."""
-        hex_data = _build_hex(power=0x05)
-        state = decode_last_data(hex_data)
-        assert state.auto_mode_available is True
-        assert state.power_on is True
-
-    def test_auto_mode_available_with_only_bit2(self) -> None:
-        """Power byte 0x04 (only bit 2) → auto mode flag is set, power is OFF."""
-        hex_data = _build_hex(power=0x04)
-        state = decode_last_data(hex_data)
-        assert state.auto_mode_available is True
-        assert state.power_on is False
-
-    def test_auto_mode_not_available_with_sleep(self) -> None:
-        """Power byte 0x81 (sleep + power on) → auto mode not available."""
-        hex_data = _build_hex(power=0x81)
-        state = decode_last_data(hex_data)
-        assert state.auto_mode_available is False
-        assert state.preset_mode == "sleep"
-
-    def test_auto_mode_available_with_sleep(self) -> None:
-        """Power byte 0x85 (sleep + power + auto) → both available."""
-        hex_data = _build_hex(power=0x85)
-        state = decode_last_data(hex_data)
-        assert state.auto_mode_available is True
-        assert state.preset_mode == "sleep"
-        assert state.power_on is True
-
-    def test_empty_state_has_auto_mode_false(self) -> None:
-        """Empty/error states default to auto_mode_available=False."""
-        state = decode_last_data("")
-        assert state.auto_mode_available is False
-
-        state = decode_last_data("ZZZZ")
-        assert state.auto_mode_available is False
-
-        state = decode_last_data("0000")
-        assert state.auto_mode_available is False
-
-
-class TestDecodeLastDataEdgeCases:
-    """Edge case tests for decode_last_data."""
-
-    def test_data_too_short_returns_empty_state(self) -> None:
-        """Data shorter than 18 bytes returns empty state."""
-        hex_data = "0000" * 8  # 16 bytes, need 18
-        state = decode_last_data(hex_data)
-        assert state.hvac_mode is None
-        assert state.target_temperature is None
-
-    def test_invalid_hex_returns_empty_state(self) -> None:
-        """Invalid hex string returns empty state with error."""
-        state = decode_last_data("ZZZZ")
-        assert state.hvac_mode is None
-        assert state.raw_state.get("error") == "decode_error"
-
-    def test_empty_string_returns_empty_state(self) -> None:
-        """Empty string returns empty state."""
-        state = decode_last_data("")
-        assert state.hvac_mode is None
-
-    def test_full_decode_round_trip(self) -> None:
-        """A complete decode with all fields set produces valid state."""
-        hex_data = _build_hex(
-            model="500B",
-            fan=0x03,  # high
-            mode=0x00,  # cool
-            power=0x01,
-            flap_pos=4,  # swing
-            flap_present=1,
-            current_temp_raw=283,  # 28.3°C
-            summer_sp_raw=240,  # 24.0°C
-            winter_sp_raw=200,  # 20.0°C
-            auto_sp_raw=220,  # 22.0°C
-        )
-        state = decode_last_data(hex_data)
-
-        assert state.hvac_mode == "cool"
-        assert state.power_on is True
-        assert state.current_temperature == pytest.approx(28.3, abs=0.01)
-        assert state.target_temperature == TEMP_24_0  # cool → summer setpoint
-        assert state.swing_mode == "Swing"
-        assert state.fan_mode == "high"
-
-    def test_preset_sleep_mode(self) -> None:
-        """Preset mode decoded from byte 7 bit 7."""
-        hex_data = _build_hex(power=0x81)  # bit 7 set = sleep, lower nibble = 1 = on
-        state = decode_last_data(hex_data)
-        assert state.preset_mode == "sleep"
-        assert state.power_on is True
-
-    def test_preset_none_mode(self) -> None:
-        """Preset mode is 'none' when byte 7 bit 7 is unset."""
-        hex_data = _build_hex(power=0x01)
-        state = decode_last_data(hex_data)
-        assert state.preset_mode == "none"

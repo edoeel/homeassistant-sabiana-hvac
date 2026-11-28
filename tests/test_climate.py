@@ -1,694 +1,709 @@
 # Copyright (c) 2026 Edoardo Mistretta
 
-"""Tests for the Sabiana HVAC Climate entity."""
+"""Tests for the Sabiana HVAC climate entity."""
 
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
-from homeassistant.components.climate import HVACMode
-from homeassistant.components.climate.const import (
-    FAN_AUTO,
-    FAN_HIGH,
-    FAN_LOW,
-    FAN_MEDIUM,
+from homeassistant.components.climate import (
+    ATTR_HVAC_MODE,
     PRESET_NONE,
     PRESET_SLEEP,
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
 )
-from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.const import ATTR_TEMPERATURE
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
-from custom_components.sabiana_hvac import api
-from custom_components.sabiana_hvac.api import (
-    SabianaApiAuthError,
-    SabianaApiClientError,
-)
+from custom_components.sabiana_hvac import api, climate
 from custom_components.sabiana_hvac.climate import (
     SabianaHvacClimateEntity,
     async_setup_entry,
 )
+from custom_components.sabiana_hvac.const import DOMAIN
 
-DEFAULT_TARGET_TEMP = 25.0
-MIN_TEMP = 10.0
-MAX_TEMP = 30.0
-TEMP_STEP = 0.5
-TEST_TARGET_TEMP = 22.0
-MIN_RESULT_LENGTH = 10
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+from .frames import FLAG_NIGHT, FLAG_ON, FLAG_REQUEST, FLAG_TIMER, FLAGS_ON, build_frame
+
+FLAG_AUTO = 1 << 2
+
+# Carisma Fly 500D, on in heating with a thermostat request and night mode:
+# fan auto, flap "Swing", T1 29.2, setpoints 24.5 / 26.0 / 22.0.
+FRAME_500D_HEATING = build_frame(
+    model="500D",
+    mode=1,
+    fan=4,
+    flags=FLAGS_ON | FLAG_REQUEST | FLAG_AUTO | FLAG_NIGHT,
+    flap=0x0401,
+    t1=292,
+    setpoint_summer=245,
+    setpoint_winter=260,
+    setpoint_auto=220,
+    range_summer=0xB40A,  # cooling 11.0-28.0
+)
+# Same frame once the winter setpoint (word 8) is 21.5 °C.
+FRAME_500D_HEATING_21_5 = FRAME_500D_HEATING[:28] + "00d7" + FRAME_500D_HEATING[32:]
+
+
+def _cloud_device(**kwargs: object) -> api.SabianaDevice:
+    """Build a device record as parsed from getDeviceForUserV2."""
+    return api.parse_device(
+        {
+            "idDevice": "device1",
+            "deviceName": "Test Device",
+            "deviceStateModelType": "cvp",
+            "lastData": FRAME_500D_HEATING,
+            "connectionUp": True,
+            "deviceStateFw": "1.23",
+            **kwargs,
+        }
+    )
 
 
 @pytest.fixture
-def mock_hass() -> Mock:
-    """Create a mock Home Assistant instance."""
-    hass = Mock()
-    hass.data = {}
-    return hass
-
-
-@pytest.fixture
-def mock_session() -> Mock:
-    """Create a mock HTTP session."""
-    return Mock(spec=httpx.AsyncClient)
-
-
-@pytest.fixture
-def mock_coordinator() -> Mock:
+def token_coordinator() -> Mock:
     """Create a mock token coordinator."""
     coordinator = Mock()
-    coordinator.short_jwt = Mock()
-    jwt_value = "test_jwt_token"
-    coordinator.short_jwt.token = jwt_value
-    coordinator.async_add_listener = Mock(return_value=Mock())
+    coordinator.short_jwt.token = "short-token"  # noqa: S105
     coordinator.async_request_refresh = AsyncMock()
-    coordinator.async_force_renew = AsyncMock(return_value="renewed_token")
+    coordinator.async_force_renew = AsyncMock(return_value="renewed-token")
     return coordinator
 
 
 @pytest.fixture
-def mock_device_coordinator() -> Mock:
-    """Create a mock device coordinator."""
+def device_coordinator() -> Mock:
+    """Create a mock device coordinator holding one 500D."""
     coordinator = Mock()
+    coordinator.data = {"device1": _cloud_device()}
     coordinator.async_add_listener = Mock(return_value=Mock())
     coordinator.async_request_refresh = AsyncMock()
-    coordinator.data = {}
+    coordinator.realtime_connected = True
     return coordinator
-
-
-@pytest.fixture
-def mock_device() -> api.SabianaDevice:
-    """Create a mock Sabiana device."""
-    return api.SabianaDevice(id="device1", name="Test Device")
 
 
 @pytest.fixture
 def entity(
-    mock_session: Mock,
-    mock_coordinator: Mock,
-    mock_device_coordinator: Mock,
-    mock_device: api.SabianaDevice,
-) -> SabianaHvacClimateEntity:
-    """Create a Sabiana HVAC Climate entity for testing."""
-    return SabianaHvacClimateEntity(
-        mock_session, mock_coordinator, mock_device_coordinator, mock_device
+    token_coordinator: Mock, device_coordinator: Mock
+) -> Iterator[SabianaHvacClimateEntity]:
+    """Create the entity, with state writes mocked out."""
+    entity = SabianaHvacClimateEntity(
+        Mock(spec=httpx.AsyncClient),
+        token_coordinator,
+        device_coordinator,
+        device_coordinator.data["device1"],
     )
+    entity.async_write_ha_state = Mock()
+    yield entity
+    for task in entity._tasks:
+        task.cancel()
+
+
+@pytest.fixture
+def send() -> Iterator[AsyncMock]:
+    """Patch devices/cmd; it answers status 0."""
+    with patch.object(
+        api, "async_send_command", AsyncMock(return_value={"status": 0, "body": {}})
+    ) as mock:
+        yield mock
+
+
+def _set_frame(device_coordinator: Mock, raw: str, **kwargs: object) -> None:
+    device_coordinator.data = {"device1": _cloud_device(lastData=raw, **kwargs)}
+
+
+def _sent(send: AsyncMock, index: int = 0) -> str:
+    """Return the data of the index-th devices/cmd call."""
+    return send.await_args_list[index].args[3]
+
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
 
 
 class TestAsyncSetupEntry:
-    """Tests for async_setup_entry function."""
+    """Platform setup."""
 
     @pytest.mark.asyncio
-    async def test_async_setup_entry_creates_entities_for_all_devices(
-        self,
-        mock_hass: Mock,
-        mock_session: Mock,
-        mock_coordinator: Mock,
-        mock_device_coordinator: Mock,
-        mock_device: api.SabianaDevice,
+    async def test_creates_entities_and_skips_rvu(
+        self, token_coordinator: Mock, device_coordinator: Mock
     ) -> None:
-        """Test that async_setup_entry creates entities for all devices."""
-        entry = Mock()
-        entry.entry_id = "test_entry"
-        mock_hass.data["sabiana_hvac"] = {
-            "test_entry": {
-                "session": mock_session,
-                "token_coordinator": mock_coordinator,
-                "device_coordinator": mock_device_coordinator,
-                "devices": [mock_device],
-            },
+        """Fancoils get an entity; RVU units never get fancoil commands."""
+        hass = Mock()
+        entry = Mock(entry_id="test_entry")
+        rvu = api.SabianaDevice(id="rvu1", name="RVU", model_type="rvu")
+        hass.data = {
+            DOMAIN: {
+                "test_entry": {
+                    "session": Mock(),
+                    "token_coordinator": token_coordinator,
+                    "device_coordinator": device_coordinator,
+                    "devices": [device_coordinator.data["device1"], rvu],
+                }
+            }
         }
-        async_add_entities = AsyncMock()
-        await async_setup_entry(mock_hass, entry, async_add_entities)
-        async_add_entities.assert_called_once()
-        assert len(async_add_entities.call_args[0][0]) == 1
-        assert isinstance(
-            async_add_entities.call_args[0][0][0],
-            SabianaHvacClimateEntity,
-        )
+        async_add_entities = Mock()
+        await async_setup_entry(hass, entry, async_add_entities)
+        entities = async_add_entities.call_args.args[0]
+        assert [e.unique_id for e in entities] == ["device1"]
+        assert isinstance(entities[0], SabianaHvacClimateEntity)
 
 
-class TestSabianaHvacClimateEntityInit:
-    """Tests for SabianaHvacClimateEntity initialization."""
+class TestDeviceInfo:
+    """Device registry entry."""
 
-    def test_init_sets_attributes_correctly(
-        self,
-        mock_session: Mock,
-        mock_coordinator: Mock,
-        mock_device_coordinator: Mock,
-        mock_device: api.SabianaDevice,
+    def test_device_info_from_record(self, entity: SabianaHvacClimateEntity) -> None:
+        """Model, model code and firmware come from getDeviceForUserV2."""
+        assert entity.name is None  # the entity takes the device name
+        info = entity.device_info
+        assert info is not None
+        assert info["identifiers"] == {(DOMAIN, "device1")}
+        assert info["name"] == "Test Device"
+        assert info["manufacturer"] == "Sabiana"
+        assert (info["model"], info["model_id"]) == ("Carisma Fly", "500D")
+        assert (info["sw_version"], info["hw_version"]) == ("1.23", "0.43")
+
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+
+class TestAvailability:
+    """Available follows connectionUp and the validity of lastData."""
+
+    def test_available_when_online_and_valid(
+        self, entity: SabianaHvacClimateEntity
     ) -> None:
-        """Test that init sets attributes correctly."""
-        entity = SabianaHvacClimateEntity(
-            mock_session, mock_coordinator, mock_device_coordinator, mock_device
-        )
-        assert entity._session == mock_session
-        assert entity._coordinator == mock_coordinator
-        assert entity._device_coordinator == mock_device_coordinator
-        assert entity._device == mock_device
-        assert entity.unique_id == "device1"
-        assert entity.name == "Test Device"
-        assert entity.hvac_mode == HVACMode.OFF
-        assert entity.target_temperature == DEFAULT_TARGET_TEMP
-        assert entity.fan_mode == FAN_AUTO
-        assert entity.swing_mode == "Swing"
-        assert entity.preset_mode == PRESET_NONE
+        """Online with a valid frame: available."""
+        assert entity.available is True
 
-    def test_init_sets_class_attributes(
-        self,
-        mock_session: Mock,
-        mock_coordinator: Mock,
-        mock_device_coordinator: Mock,
-        mock_device: api.SabianaDevice,
-    ) -> None:
-        """Test that init sets class attributes correctly."""
-        entity = SabianaHvacClimateEntity(
-            mock_session, mock_coordinator, mock_device_coordinator, mock_device
-        )
-        assert HVACMode.OFF in entity.hvac_modes
-        assert HVACMode.COOL in entity.hvac_modes
-        assert HVACMode.HEAT in entity.hvac_modes
-        assert HVACMode.FAN_ONLY in entity.hvac_modes
-        # AUTO not in default modes (added dynamically by device)
-        assert HVACMode.AUTO not in entity.hvac_modes
-        assert FAN_LOW in entity.fan_modes
-        assert FAN_MEDIUM in entity.fan_modes
-        assert FAN_HIGH in entity.fan_modes
-        assert FAN_AUTO in entity.fan_modes
-        assert "Vertical" in entity.swing_modes
-        assert "Horizontal" in entity.swing_modes
-        assert "45 Degrees" in entity.swing_modes
-        assert "Swing" in entity.swing_modes
-        assert PRESET_SLEEP in entity.preset_modes
-        assert PRESET_NONE in entity.preset_modes
-        assert entity.temperature_unit == UnitOfTemperature.CELSIUS
-        assert entity.min_temp == MIN_TEMP
-        assert entity.max_temp == MAX_TEMP
-        assert entity.target_temperature_step == TEMP_STEP
-
-
-class TestSabianaHvacClimateEntityCelsiusToHex:
-    """Tests for _celsius_to_hex method."""
-
-    def test_celsius_to_hex_converts_temperature_correctly(
+    @pytest.mark.parametrize(
+        "kwargs", [{"connectionUp": False}, {"lastData": "999999"}]
+    )
+    def test_unavailable(
         self,
         entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        kwargs: dict[str, Any],
     ) -> None:
-        """Test that _celsius_to_hex converts temperature correctly."""
-        assert entity._celsius_to_hex(25.0) == "00fa"
-        assert entity._celsius_to_hex(20.0) == "00c8"
-        assert entity._celsius_to_hex(30.0) == "012c"
-        assert entity._celsius_to_hex(10.0) == "0064"
+        """Offline or DATA-ERROR: unavailable, as the app blocks control."""
+        device_coordinator.data = {"device1": _cloud_device(**kwargs)}
+        assert entity.available is False
 
-    def test_celsius_to_hex_handles_decimal_temperatures(
-        self,
-        entity: SabianaHvacClimateEntity,
+    def test_unavailable_while_socket_is_down(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
     ) -> None:
-        """Test that _celsius_to_hex handles decimal temperatures."""
-        assert entity._celsius_to_hex(25.5) == "00ff"
-        assert entity._celsius_to_hex(20.3) == "00cb"
+        """App: with the socket down the cloud is offline, nothing is controllable."""
+        device_coordinator.realtime_connected = False
+        assert entity.available is False
 
-
-class TestSabianaHvacClimateEntityMapFanMode:
-    """Tests for _map_fan_mode_to_sabiana_char method."""
-
-    def test_map_fan_mode_to_sabiana_char_returns_correct_values(
-        self,
-        entity: SabianaHvacClimateEntity,
+    def test_unavailable_without_record(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
     ) -> None:
-        """Test that _map_fan_mode_to_sabiana_char returns correct values."""
-        assert entity._map_fan_mode_to_sabiana_char(FAN_LOW) == "1"
-        assert entity._map_fan_mode_to_sabiana_char(FAN_MEDIUM) == "2"
-        assert entity._map_fan_mode_to_sabiana_char(FAN_HIGH) == "3"
-        assert entity._map_fan_mode_to_sabiana_char(FAN_AUTO) == "4"
-
-    def test_map_fan_mode_to_sabiana_char_returns_default_for_unknown(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _map_fan_mode_to_sabiana_char returns default for unknown."""
-        assert entity._map_fan_mode_to_sabiana_char("unknown") == "4"
-        assert entity._map_fan_mode_to_sabiana_char(None) == "4"
+        """No record for the device: unavailable, no values."""
+        device_coordinator.data = {}
+        assert (entity.available, entity.hvac_mode) == (False, None)
 
 
-class TestSabianaHvacClimateEntityMapHvacMode:
-    """Tests for _map_hvac_mode_to_sabiana_char method."""
+class TestStateFromDevice:
+    """Mapping of the decoded state onto the climate entity."""
 
-    def test_map_hvac_mode_to_sabiana_char_returns_correct_values(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _map_hvac_mode_to_sabiana_char returns correct values."""
-        assert entity._map_hvac_mode_to_sabiana_char(HVACMode.COOL) == "0"
-        assert entity._map_hvac_mode_to_sabiana_char(HVACMode.HEAT) == "1"
-        assert entity._map_hvac_mode_to_sabiana_char(HVACMode.FAN_ONLY) == "3"
-        assert entity._map_hvac_mode_to_sabiana_char(HVACMode.OFF) == "4"
-
-    def test_map_hvac_mode_to_sabiana_char_returns_default_for_unknown(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _map_hvac_mode_to_sabiana_char returns default for unknown."""
-        assert entity._map_hvac_mode_to_sabiana_char(None) == "4"
-
-
-class TestSabianaHvacClimateEntityMapSwingMode:
-    """Tests for _map_swing_mode_to_sabiana_char method."""
-
-    def test_map_swing_mode_to_sabiana_char_returns_correct_values(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _map_swing_mode_to_sabiana_char returns correct values."""
-        assert entity._map_swing_mode_to_sabiana_char("Vertical") == "3"
-        assert entity._map_swing_mode_to_sabiana_char("Horizontal") == "1"
-        assert entity._map_swing_mode_to_sabiana_char("45 Degrees") == "2"
-        assert entity._map_swing_mode_to_sabiana_char("Swing") == "4"
-
-    def test_map_swing_mode_to_sabiana_char_returns_default_for_unknown(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _map_swing_mode_to_sabiana_char returns default for unknown."""
-        assert entity._map_swing_mode_to_sabiana_char("unknown") == "4"
-        assert entity._map_swing_mode_to_sabiana_char(None) == "4"
-
-
-class TestSabianaHvacClimateEntityMapPresetMode:
-    """Tests for _map_preset_mode_to_sabiana_char method."""
-
-    def test_map_preset_mode_to_sabiana_char_returns_sleep_for_sleep(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _map_preset_mode_to_sabiana_char returns sleep for sleep."""
-        assert entity._map_preset_mode_to_sabiana_char(PRESET_SLEEP) == "2"
-
-    def test_map_preset_mode_to_sabiana_char_returns_zero_for_other(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _map_preset_mode_to_sabiana_char returns zero for other."""
-        assert entity._map_preset_mode_to_sabiana_char(PRESET_NONE) == "0"
-        assert entity._map_preset_mode_to_sabiana_char(None) == "0"
-        assert entity._map_preset_mode_to_sabiana_char("other") == "0"
-
-
-class TestSabianaHvacClimateEntityBuildCommandPayload:
-    """Tests for _build_command_payload method."""
-
-    def test_build_command_payload_creates_correct_format(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _build_command_payload creates correct format."""
-        entity._attr_hvac_mode = HVACMode.COOL
-        entity._attr_target_temperature = 25.0
-        entity._attr_fan_mode = FAN_AUTO
-        entity._attr_swing_mode = "Swing"
-        entity._attr_preset_mode = None
-        result = entity._build_command_payload()
-        assert result.startswith("0")
-        assert "00fa" in result
-        assert len(result) > MIN_RESULT_LENGTH
-
-    def test_build_command_payload_includes_all_components(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _build_command_payload includes all components."""
-        entity._attr_hvac_mode = HVACMode.HEAT
-        entity._attr_target_temperature = 20.0
-        entity._attr_fan_mode = FAN_HIGH
-        entity._attr_swing_mode = "Vertical"
-        entity._attr_preset_mode = PRESET_SLEEP
-        result = entity._build_command_payload()
-        assert "03" in result
-        assert "01" in result
-        assert "00c8" in result
-        assert "2" in result
-
-
-class TestSabianaHvacClimateEntityAsyncExecuteCommand:
-    """Tests for _async_execute_command method."""
-
-    @pytest.mark.asyncio
-    async def test_async_execute_command_sends_command_successfully(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _async_execute_command sends command successfully."""
-        with patch(
-            "custom_components.sabiana_hvac.climate.api.async_send_command",
-            return_value=True,
-        ) as mock_send:
-            entity.async_write_ha_state = Mock()
-            await entity._async_execute_command()
-            mock_send.assert_called_once()
-            entity.async_write_ha_state.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_async_execute_command_handles_auth_error(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _async_execute_command handles auth error."""
-        error_message = "Auth failed"
-        with patch(
-            "custom_components.sabiana_hvac.climate.api.async_send_command",
-            side_effect=SabianaApiAuthError(error_message),
-        ):
-            entity.async_write_ha_state = Mock()
-            await entity._async_execute_command()
-            entity.async_write_ha_state.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_async_execute_command_handles_client_error(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _async_execute_command handles client error."""
-        error_message = "API error"
-        with patch(
-            "custom_components.sabiana_hvac.climate.api.async_send_command",
-            side_effect=SabianaApiClientError(error_message),
-        ):
-            entity.async_write_ha_state = Mock()
-            await entity._async_execute_command()
-            entity.async_write_ha_state.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_async_execute_command_handles_request_error(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _async_execute_command handles request error."""
-        error_message = "Connection error"
-        with patch(
-            "custom_components.sabiana_hvac.climate.api.async_send_command",
-            side_effect=httpx.RequestError(error_message),
-        ):
-            entity.async_write_ha_state = Mock()
-            await entity._async_execute_command()
-            entity.async_write_ha_state.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_async_execute_command_propagates_unexpected_error(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that _async_execute_command propagates unexpected errors."""
-        error_message = "Unexpected error"
-        with patch(
-            "custom_components.sabiana_hvac.climate.api.async_send_command",
-            side_effect=Exception(error_message),
-        ):
-            entity.async_write_ha_state = Mock()
-            with pytest.raises(Exception, match=error_message):
-                await entity._async_execute_command()
-            entity.async_write_ha_state.assert_not_called()
-
-
-class TestSabianaHvacClimateEntityAsyncAddedToHass:
-    """Tests for async_added_to_hass method."""
-
-    @pytest.mark.asyncio
-    async def test_async_added_to_hass_registers_listener(
-        self,
-        entity: SabianaHvacClimateEntity,
-        mock_device_coordinator: Mock,
-    ) -> None:
-        """Test that async_added_to_hass registers listener."""
-        entity.async_get_last_state = AsyncMock(return_value=None)
-        with patch.object(entity, "async_get_last_state", return_value=None):
-            await entity.async_added_to_hass()
-            mock_device_coordinator.async_add_listener.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_async_added_to_hass_restores_state_when_available(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_added_to_hass restores state when available."""
-        last_state = Mock()
-        last_state.state = HVACMode.COOL
-        last_state.attributes = {
-            ATTR_TEMPERATURE: TEST_TARGET_TEMP,
-            "fan_mode": FAN_HIGH,
-            "swing_mode": "Vertical",
-            "preset_mode": PRESET_SLEEP,
-        }
-        entity.async_get_last_state = AsyncMock(return_value=last_state)
-        await entity.async_added_to_hass()
-        assert entity.hvac_mode == HVACMode.COOL
-        assert entity.target_temperature == TEST_TARGET_TEMP
-        assert entity.fan_mode == FAN_HIGH
-        assert entity.swing_mode == "Vertical"
-        assert entity.preset_mode == PRESET_SLEEP
-
-    @pytest.mark.asyncio
-    async def test_async_added_to_hass_handles_missing_state(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_added_to_hass handles missing state."""
-        entity.async_get_last_state = AsyncMock(return_value=None)
-        await entity.async_added_to_hass()
-        assert entity.hvac_mode == HVACMode.OFF
-
-
-class TestSabianaHvacClimateEntityAsyncWillRemoveFromHass:
-    """Tests for async_will_remove_from_hass method."""
-
-    @pytest.mark.asyncio
-    async def test_async_will_remove_from_hass_unsubscribes_listener(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_will_remove_from_hass unsubscribes listener."""
-        mock_unsub = Mock()
-        entity._coordinator_listener_unsub = mock_unsub
-        await entity.async_will_remove_from_hass()
-        mock_unsub.assert_called_once()
-        assert entity._coordinator_listener_unsub is None
-
-    @pytest.mark.asyncio
-    async def test_async_will_remove_from_hass_handles_no_listener(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_will_remove_from_hass handles no listener."""
-        entity._coordinator_listener_unsub = None
-        await entity.async_will_remove_from_hass()
-        assert entity._coordinator_listener_unsub is None
-
-
-class TestSabianaHvacClimateEntityAsyncSetHvacMode:
-    """Tests for async_set_hvac_mode method."""
-
-    @pytest.mark.asyncio
-    async def test_async_set_hvac_mode_updates_mode_and_executes_command(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_set_hvac_mode updates mode and executes command."""
-        entity._async_execute_command = AsyncMock()
-        await entity.async_set_hvac_mode(HVACMode.COOL)
-        assert entity.hvac_mode == HVACMode.COOL
-        entity._async_execute_command.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_async_set_hvac_mode_handles_all_modes(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_set_hvac_mode handles all modes."""
-        entity._async_execute_command = AsyncMock()
-        for mode in [
+    def test_heating_500d(self, entity: SabianaHvacClimateEntity) -> None:
+        """Every attribute of a 500D in heating."""
+        assert entity.hvac_mode == HVACMode.HEAT
+        assert entity.hvac_action == HVACAction.HEATING
+        assert (entity.target_temperature, entity.current_temperature) == (26.0, 29.2)
+        assert (entity.min_temp, entity.max_temp) == (10.0, 30.0)
+        assert entity.hvac_modes == [
             HVACMode.OFF,
             HVACMode.COOL,
             HVACMode.HEAT,
             HVACMode.AUTO,
             HVACMode.FAN_ONLY,
-        ]:
-            await entity.async_set_hvac_mode(mode)
-            assert entity.hvac_mode == mode
+        ]
+        assert (entity.fan_mode, entity.fan_modes) == (
+            "auto",
+            ["low", "medium", "high", "auto"],
+        )
+        assert entity.swing_mode == "Swing"
+        assert entity.swing_modes == [
+            "Stop swing",
+            "Horizontal",
+            "45 Degrees",
+            "Vertical",
+            "Swing",
+        ]
+        assert (entity.preset_mode, entity.preset_modes) == (
+            PRESET_SLEEP,
+            [PRESET_NONE, PRESET_SLEEP],
+        )
+        assert entity.supported_features == (
+            ClimateEntityFeature.TURN_ON
+            | ClimateEntityFeature.TURN_OFF
+            | ClimateEntityFeature.FAN_MODE
+            | ClimateEntityFeature.TARGET_TEMPERATURE
+            | ClimateEntityFeature.SWING_MODE
+            | ClimateEntityFeature.PRESET_MODE
+        )
+
+    def test_cool_mode_limits(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
+    ) -> None:
+        """Word 10 sets the limits in cooling."""
+        cool = FRAME_500D_HEATING[:8] + "0400" + FRAME_500D_HEATING[12:]
+        _set_frame(device_coordinator, cool)
+        assert (entity.hvac_mode, entity.target_temperature) == (HVACMode.COOL, 24.5)
+        assert (entity.min_temp, entity.max_temp) == (11.0, 28.0)
+
+    def test_off(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
+    ) -> None:
+        """A unit switched off reports off."""
+        _set_frame(device_coordinator, build_frame(flags=FLAGS_ON & ~FLAG_ON))
+        assert (entity.hvac_mode, entity.hvac_action) == (HVACMode.OFF, HVACAction.OFF)
+
+    def test_whisper_continuous_fan_without_flap(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
+    ) -> None:
+        """A Whisper (5020): 19A fan levels, no flap."""
+        _set_frame(
+            device_coordinator,
+            build_frame(model="5020", fan=65),
+            deviceStateModelType="evo",
+        )
+        assert entity.fan_mode == "5.5"
+        assert entity.fan_modes is not None
+        assert entity.fan_modes[:3] == ["auto", "1", "1.5"]
+        assert entity.swing_modes is None
+        assert not entity.supported_features & ClimateEntityFeature.SWING_MODE
+
+    def test_meltemi(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
+    ) -> None:
+        """Meltemi: no cooling, two fan speeds, no night mode, simple flap."""
+        _set_frame(
+            device_coordinator,
+            build_frame(model="5029", fan=1, flags=FLAGS_ON | FLAG_AUTO, flap=0x0001),
+            deviceStateModelType="tmb",
+        )
+        assert HVACMode.COOL not in entity.hvac_modes
+        assert HVACMode.AUTO in entity.hvac_modes  # max heating
+        assert entity.fan_modes == ["low", "high"]
+        assert entity.preset_modes is None
+        assert entity.swing_modes == ["Stop swing", "Swing"]
+
+    def test_fan_only_has_no_setpoint(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
+    ) -> None:
+        """No target temperature in fan only."""
+        _set_frame(device_coordinator, build_frame(mode=3))
+        assert (entity.hvac_mode, entity.target_temperature) == (
+            HVACMode.FAN_ONLY,
+            None,
+        )
+        assert not entity.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE
+
+    def test_eco_limited_mode(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
+    ) -> None:
+        """CFF ECO without DIP: only on/off and fan."""
+        _set_frame(
+            device_coordinator,
+            build_frame(model="5021", mode=1),
+            deviceStateModelType="eco",
+        )
+        assert entity.hvac_modes == [HVACMode.OFF, HVACMode.HEAT]
+        assert not entity.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE
+        assert not entity.supported_features & ClimateEntityFeature.PRESET_MODE
 
 
-class TestSabianaHvacClimateEntityAsyncSetTemperature:
-    """Tests for async_set_temperature method."""
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+class TestCommands:
+    """Each action sends the full 2304 block built from the current state."""
 
     @pytest.mark.asyncio
-    async def test_async_set_temperature_updates_temperature(
+    async def test_set_temperature(
         self,
         entity: SabianaHvacClimateEntity,
+        send: AsyncMock,
+        token_coordinator: Mock,
     ) -> None:
-        """Test that async_set_temperature updates temperature."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.COOL
-        await entity.async_set_temperature(**{ATTR_TEMPERATURE: TEST_TARGET_TEMP})
-        assert entity.target_temperature == TEST_TARGET_TEMP
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_called_once()
+        """The setpoint goes in register 2; flap and night are kept."""
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.5})
+        token_coordinator.async_request_refresh.assert_awaited()
+        assert send.await_args.args[1:3] == ("short-token", "device1")
+        assert _sent(send) == "040100D70401FFFF0002"
+        assert entity.target_temperature == 21.5  # noqa: PLR2004 (pending value)
 
     @pytest.mark.asyncio
-    async def test_async_set_temperature_does_not_execute_when_off(
+    async def test_set_temperature_keeps_timer(
         self,
         entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
     ) -> None:
-        """Test that async_set_temperature does not execute when off."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.OFF
-        await entity.async_set_temperature(**{ATTR_TEMPERATURE: TEST_TARGET_TEMP})
-        assert entity.target_temperature == TEST_TARGET_TEMP
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_not_called()
+        """An active timer stays active (bit 0 of register 5)."""
+        _set_frame(device_coordinator, build_frame(flags=FLAGS_ON | FLAG_TIMER))
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 22})
+        assert _sent(send).endswith("0001")
 
     @pytest.mark.asyncio
-    async def test_async_set_temperature_does_not_execute_when_temperature_none(
-        self,
-        entity: SabianaHvacClimateEntity,
+    async def test_set_temperature_with_mode(
+        self, entity: SabianaHvacClimateEntity, send: AsyncMock
     ) -> None:
-        """Test that async_set_temperature does not execute when temperature is None."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.COOL
-        await entity.async_set_temperature(**{ATTR_TEMPERATURE: None})
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_not_called()
-
-
-class TestSabianaHvacClimateEntityAsyncSetFanMode:
-    """Tests for async_set_fan_mode method."""
+        """Mode and temperature in one call: one command."""
+        await entity.async_set_temperature(
+            **{ATTR_TEMPERATURE: 23, ATTR_HVAC_MODE: HVACMode.COOL}
+        )
+        assert send.await_count == 1
+        assert _sent(send) == "040000E60401FFFF0002"
 
     @pytest.mark.asyncio
-    async def test_async_set_fan_mode_updates_mode_and_executes_when_on(
+    async def test_set_temperature_in_fan_only_is_refused(
         self,
         entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
     ) -> None:
-        """Test that async_set_fan_mode updates mode and executes when on."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.COOL
-        await entity.async_set_fan_mode(FAN_HIGH)
-        assert entity.fan_mode == FAN_HIGH
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_called_once()
+        """Fan only has no setpoint."""
+        _set_frame(device_coordinator, build_frame(mode=3))
+        with pytest.raises(ServiceValidationError):
+            await entity.async_set_temperature(**{ATTR_TEMPERATURE: 22})
+        send.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_async_set_fan_mode_does_not_execute_when_off(
+    @pytest.mark.parametrize(
+        ("hvac_mode", "expected"),
+        [
+            (HVACMode.COOL, "040000F50401FFFF0002"),  # summer setpoint 24.5
+            (HVACMode.AUTO, "040200DC0401FFFF0002"),  # auto setpoint 22.0
+            (HVACMode.FAN_ONLY, "040300000401FFFF0002"),  # setpoint 0
+            (HVACMode.OFF, "040401040401FFFF0002"),  # mode 4, values kept
+        ],
+    )
+    async def test_set_hvac_mode(
         self,
         entity: SabianaHvacClimateEntity,
+        send: AsyncMock,
+        hvac_mode: HVACMode,
+        expected: str,
     ) -> None:
-        """Test that async_set_fan_mode does not execute when off."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.OFF
-        await entity.async_set_fan_mode(FAN_HIGH)
-        assert entity.fan_mode == FAN_HIGH
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_not_called()
-
-
-class TestSabianaHvacClimateEntityAsyncSetSwingMode:
-    """Tests for async_set_swing_mode method."""
+        """A mode change loads the setpoint stored for that mode."""
+        await entity.async_set_hvac_mode(hvac_mode)
+        assert _sent(send) == expected
+        assert entity.hvac_mode == hvac_mode
 
     @pytest.mark.asyncio
-    async def test_async_set_swing_mode_updates_mode_and_executes_when_on(
+    async def test_turn_on_keeps_the_mode(
         self,
         entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
     ) -> None:
-        """Test that async_set_swing_mode updates mode and executes when on."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.COOL
-        await entity.async_set_swing_mode("Vertical")
-        assert entity.swing_mode == "Vertical"
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_async_set_swing_mode_does_not_execute_when_off(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_set_swing_mode does not execute when off."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.OFF
-        await entity.async_set_swing_mode("Vertical")
-        assert entity.swing_mode == "Vertical"
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_not_called()
-
-
-class TestSabianaHvacClimateEntityAsyncSetPresetMode:
-    """Tests for async_set_preset_mode method."""
-
-    @pytest.mark.asyncio
-    async def test_async_set_preset_mode_updates_mode_and_executes_when_on(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_set_preset_mode updates mode and executes when on."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.COOL
-        await entity.async_set_preset_mode(PRESET_SLEEP)
-        assert entity.preset_mode == PRESET_SLEEP
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_async_set_preset_mode_does_not_execute_when_off(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_set_preset_mode does not execute when off."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.OFF
-        await entity.async_set_preset_mode(PRESET_SLEEP)
-        assert entity.preset_mode == PRESET_SLEEP
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_async_set_preset_mode_handles_none(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_set_preset_mode handles None."""
-        entity.async_write_ha_state = Mock()
-        entity._async_execute_command = AsyncMock()
-        entity._attr_hvac_mode = HVACMode.COOL
-        await entity.async_set_preset_mode(None)
-        assert entity.preset_mode is None
-        entity.async_write_ha_state.assert_called_once()
-        entity._async_execute_command.assert_called_once()
-
-
-class TestSabianaHvacClimateEntityAsyncTurnOn:
-    """Tests for async_turn_on method."""
-
-    @pytest.mark.asyncio
-    async def test_async_turn_on_sets_fan_only_mode(
-        self,
-        entity: SabianaHvacClimateEntity,
-    ) -> None:
-        """Test that async_turn_on sets fan only mode."""
-        entity.async_set_hvac_mode = AsyncMock()
+        """Turning on restores the stored mode (cooling here), not fan only."""
+        _set_frame(device_coordinator, build_frame(mode=0, flags=FLAGS_ON & ~FLAG_ON))
         await entity.async_turn_on()
-        entity.async_set_hvac_mode.assert_called_once_with(HVACMode.FAN_ONLY)
-
-
-class TestSabianaHvacClimateEntityAsyncTurnOff:
-    """Tests for async_turn_off method."""
+        assert _sent(send) == "040000F0FF00FFFF0000"
+        assert entity.hvac_mode == HVACMode.COOL
 
     @pytest.mark.asyncio
-    async def test_async_turn_off_sets_off_mode(
+    async def test_turn_off(
+        self, entity: SabianaHvacClimateEntity, send: AsyncMock
+    ) -> None:
+        """Off is mode 4 with the current fan."""
+        await entity.async_turn_off()
+        assert _sent(send).startswith("0404")
+        assert entity.hvac_mode == HVACMode.OFF
+
+    @pytest.mark.asyncio
+    async def test_turn_off_keeps_the_flap_set_from_the_app(
         self,
         entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
     ) -> None:
-        """Test that async_turn_off sets off mode."""
-        entity.async_set_hvac_mode = AsyncMock()
+        """Regression: the old integration reopened the flap when turning off.
+
+        HA had set "Vertical" (full open), then the app set "Stop swing"
+        (position 0), which the old code could not represent: turning off
+        from HA sent 0301 and left the flap open. The off command must carry
+        the position the unit reports, as the app does.
+        """
+        await entity.async_set_swing_mode("Vertical")
+        assert _sent(send)[8:12] == "0301"
+        full_open = FRAME_500D_HEATING[:16] + "0301" + FRAME_500D_HEATING[20:]
+        _set_frame(device_coordinator, full_open)
+        entity._handle_coordinator_update()  # confirmed
+        stop_swing = FRAME_500D_HEATING[:16] + "0001" + FRAME_500D_HEATING[20:]
+        _set_frame(device_coordinator, stop_swing)  # changed from the app
+        entity._handle_coordinator_update()
+        assert entity.swing_mode == "Stop swing"
+
+        entity._last_send = -climate.COMMAND_THROTTLE  # later, outside the throttle
         await entity.async_turn_off()
-        entity.async_set_hvac_mode.assert_called_once_with(HVACMode.OFF)
+        assert _sent(send, 1) == "040401040001FFFF0002"
+
+    @pytest.mark.asyncio
+    async def test_remote_off_blocks_turning_on(
+        self,
+        entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
+    ) -> None:
+        """With the remote on/off active the app forbids turning on."""
+        _set_frame(device_coordinator, build_frame(flags=FLAG_ON))  # bit 8 = 0
+        with pytest.raises(ServiceValidationError, match="remote control"):
+            await entity.async_turn_on()
+        with pytest.raises(ServiceValidationError, match="remote control"):
+            await entity.async_set_hvac_mode(HVACMode.HEAT)
+        send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_set_fan_mode_on_continuous_scale(
+        self,
+        entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
+    ) -> None:
+        """19A: level 5.5 is fan value 65 (0x41); names of other scales fail."""
+        _set_frame(
+            device_coordinator, build_frame(model="5020"), deviceStateModelType="evo"
+        )
+        await entity.async_set_fan_mode("5.5")
+        assert _sent(send) == "410100C8FF00FFFF0000"
+        with pytest.raises(ServiceValidationError):
+            await entity.async_set_fan_mode("medium")
+
+    @pytest.mark.asyncio
+    async def test_set_swing_mode(
+        self, entity: SabianaHvacClimateEntity, send: AsyncMock
+    ) -> None:
+        """Stop swing is flap position 0."""
+        await entity.async_set_swing_mode("Stop swing")
+        assert _sent(send) == "040101040001FFFF0002"
+
+    @pytest.mark.asyncio
+    async def test_unit_without_flap(
+        self,
+        entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
+    ) -> None:
+        """Units without flap send FF00 and refuse swing modes."""
+        _set_frame(
+            device_coordinator, build_frame(model="5020"), deviceStateModelType="evo"
+        )
+        with pytest.raises(ServiceValidationError):
+            await entity.async_set_swing_mode("Swing")
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21})
+        assert _sent(send)[8:12] == "FF00"
+
+    @pytest.mark.asyncio
+    async def test_set_preset_mode(
+        self,
+        entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
+    ) -> None:
+        """Night mode is bit 1 of register 5, and only changes when on."""
+        await entity.async_set_preset_mode(PRESET_NONE)
+        assert _sent(send).endswith("0000")
+
+        _set_frame(device_coordinator, build_frame(flags=FLAGS_ON & ~FLAG_ON))
+        entity._pending = None
+        with pytest.raises(ServiceValidationError, match="Turn"):
+            await entity.async_set_preset_mode(PRESET_SLEEP)
+
+    @pytest.mark.asyncio
+    async def test_setpoint_and_fan_need_the_unit_on(
+        self,
+        entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
+    ) -> None:
+        """App: while off only on/off and the flap can be used."""
+        _set_frame(
+            device_coordinator, build_frame(flap=0x0401, flags=FLAGS_ON & ~FLAG_ON)
+        )
+        with pytest.raises(ServiceValidationError, match="setpoint"):
+            await entity.async_set_temperature(**{ATTR_TEMPERATURE: 22})
+        with pytest.raises(ServiceValidationError, match="fan speed"):
+            await entity.async_set_fan_mode("high")
+        send.assert_not_awaited()
+
+        await entity.async_set_swing_mode("Stop swing")  # the flap works when off
+        assert _sent(send) == "040400C80001FFFF0000"
+
+    @pytest.mark.asyncio
+    async def test_setpoint_with_turn_on_is_allowed_when_off(
+        self,
+        entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
+    ) -> None:
+        """A call that also turns the unit on may set the setpoint."""
+        _set_frame(device_coordinator, build_frame(flags=FLAGS_ON & ~FLAG_ON))
+        await entity.async_set_temperature(
+            **{ATTR_TEMPERATURE: 22, ATTR_HVAC_MODE: HVACMode.HEAT}
+        )
+        assert _sent(send) == "040100DCFF00FFFF0000"
+
+    @pytest.mark.asyncio
+    async def test_timer_bit_is_read_when_sending(
+        self,
+        entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
+    ) -> None:
+        """A frame arriving during the throttle updates the timer bit sent."""
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21})
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.5})  # trailing
+        timer_on = FRAME_500D_HEATING[:12] + "11c7" + FRAME_500D_HEATING[16:]
+        _set_frame(device_coordinator, timer_on)
+        assert entity._trailing_task is not None
+        with patch.object(climate.asyncio, "sleep", AsyncMock()):
+            await entity._trailing_task
+        assert _sent(send, 1) == "040100D70401FFFF0003"
+
+    @pytest.mark.asyncio
+    async def test_unchanged_values_send_nothing(
+        self, entity: SabianaHvacClimateEntity, send: AsyncMock
+    ) -> None:
+        """Like the app, nothing is sent when nothing changes."""
+        await entity.async_set_hvac_mode(HVACMode.HEAT)
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 26.0})
+        send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_offline_device_refuses_commands(
+        self,
+        entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
+    ) -> None:
+        """Offline units cannot be controlled."""
+        device_coordinator.data = {"device1": _cloud_device(connectionUp=False)}
+        with pytest.raises(HomeAssistantError, match="offline"):
+            await entity.async_turn_off()
+        send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_socket_down_refuses_commands(
+        self,
+        entity: SabianaHvacClimateEntity,
+        device_coordinator: Mock,
+        send: AsyncMock,
+    ) -> None:
+        """No REST fallback: commands wait for the socket, like the app."""
+        device_coordinator.realtime_connected = False
+        with pytest.raises(HomeAssistantError, match="cloud is offline"):
+            await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21})
+        send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_error_clears_pending(
+        self, entity: SabianaHvacClimateEntity, send: AsyncMock
+    ) -> None:
+        """A rejected command raises and shows the device state again."""
+        send.side_effect = api.SabianaApiClientError("boom")
+        with pytest.raises(HomeAssistantError, match="boom"):
+            await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21})
+        assert entity._pending is None
+        assert entity.target_temperature == 26.0  # noqa: PLR2004
+
+    @pytest.mark.asyncio
+    async def test_auth_error_renews_and_retries_once(
+        self,
+        entity: SabianaHvacClimateEntity,
+        send: AsyncMock,
+        token_coordinator: Mock,
+    ) -> None:
+        """A rejected token is renewed and the command sent again."""
+        send.side_effect = [api.SabianaApiAuthError("expired"), {"status": 0}]
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21})
+        token_coordinator.async_force_renew.assert_awaited_once()
+        assert send.await_args_list[1].args[1] == "renewed-token"
+
+    @pytest.mark.asyncio
+    async def test_rotated_token_is_stored(
+        self,
+        entity: SabianaHvacClimateEntity,
+        send: AsyncMock,
+        token_coordinator: Mock,
+    ) -> None:
+        """A token in the cmd response is the new long JWT."""
+        send.return_value = {"status": 0, "token": "a.rotated-long.jwt"}
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21})
+        token_coordinator.store_rotated_long_jwt.assert_called_once_with(
+            "a.rotated-long.jwt"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Confirmation and throttling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("send")
+class TestConfirmation:
+    """Pending values are kept until a matching frame, or a timeout."""
+
+    @pytest.mark.asyncio
+    async def test_matching_frame_confirms(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
+    ) -> None:
+        """A frame showing the new setpoint ends the pending state."""
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.5})
+
+        entity._handle_coordinator_update()  # an older frame: still pending
+        assert entity._pending is not None
+        assert entity.target_temperature == 21.5  # noqa: PLR2004
+
+        _set_frame(device_coordinator, FRAME_500D_HEATING_21_5)
+        entity._handle_coordinator_update()
+        assert entity._pending is None
+        assert entity.target_temperature == 21.5  # noqa: PLR2004
+
+    @pytest.mark.asyncio
+    async def test_timeout_reverts(
+        self, entity: SabianaHvacClimateEntity, device_coordinator: Mock
+    ) -> None:
+        """Without confirmation the device state is shown again."""
+        with patch.object(climate.asyncio, "sleep", AsyncMock()) as sleep:
+            await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.5})
+            for task in list(entity._tasks):
+                await task
+        sleep.assert_awaited_with(climate.COMMAND_CONFIRM_TIMEOUT)
+        device_coordinator.async_request_refresh.assert_not_awaited()
+        assert entity._pending is None
+        assert entity.target_temperature == 26.0  # noqa: PLR2004
+
+
+class TestThrottle:
+    """At most one command every 1.5 s; the last values win."""
+
+    @pytest.mark.asyncio
+    async def test_leading_and_trailing(
+        self, entity: SabianaHvacClimateEntity, send: AsyncMock
+    ) -> None:
+        """First change sent at once, later ones merged into one send."""
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21})
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.5})
+        await entity.async_set_fan_mode("high")
+        assert send.await_count == 1
+        assert entity._trailing_task is not None
+
+        with patch.object(climate.asyncio, "sleep", AsyncMock()):
+            await entity._trailing_task
+        assert send.await_count == 2  # noqa: PLR2004
+        assert _sent(send, 1) == "030100D70401FFFF0002"
