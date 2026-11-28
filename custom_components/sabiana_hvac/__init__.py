@@ -4,7 +4,8 @@
 
 This integration provides climate control for Sabiana HVAC systems.
 It uses WebSocket connections for real-time device state updates,
-with REST API polling as a fallback.
+reading the device list via REST only when the app does (setup,
+reconnections, server refresh requests).
 """
 
 from __future__ import annotations
@@ -12,14 +13,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-import httpx
 from homeassistant.const import Platform
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
-from . import api
 from .api import create_session_client
 from .const import CONF_LONG_JWT, CONF_SHORT_JWT, DOMAIN
 from .coordinator import SabianaDeviceCoordinator, SabianaTokenCoordinator
@@ -31,7 +30,11 @@ PLATFORMS = [Platform.CLIMATE]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up the Sabiana HVAC integration from a config entry."""
+    """Set up the Sabiana HVAC integration from a config entry.
+
+    Same order as the app: read the device list (getDeviceForUserV2), then
+    open the Socket.IO channel.
+    """
     _LOGGER.info("Setting up Sabiana HVAC integration for entry %s", entry.entry_id)
 
     if CONF_SHORT_JWT not in entry.data or CONF_LONG_JWT not in entry.data:
@@ -47,82 +50,64 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await coordinator.async_config_entry_first_refresh()
 
+    websocket_manager = SabianaWebSocketManager(
+        hass,
+        lambda: coordinator.short_jwt,
+        refresh_token=coordinator.async_request_refresh,
+    )
+    device_coordinator = SabianaDeviceCoordinator(
+        hass,
+        session,
+        coordinator,
+        entry,
+        websocket_manager=websocket_manager,
+    )
+
+    # Raises ConfigEntryNotReady on failure, so Home Assistant retries.
+    await device_coordinator.async_config_entry_first_refresh()
+    devices = list(device_coordinator.data.values())
+    _LOGGER.info("Successfully retrieved %d devices from Sabiana API", len(devices))
+
+    # Try to connect to WebSocket (non-blocking, will reconnect if fails)
     try:
-        _LOGGER.debug("Fetching devices from Sabiana API")
-        devices = await api.async_get_devices(session, coordinator.short_jwt.token)
-        _LOGGER.info("Successfully retrieved %d devices from Sabiana API", len(devices))
-    except api.SabianaApiAuthError as err:
-        _LOGGER.warning(
-            "Authentication failed for entry %s: %s",
-            entry.entry_id,
-            str(err),
-        )
-    except api.SabianaApiClientError:
-        _LOGGER.exception("API client error for entry %s", entry.entry_id)
-    except httpx.ConnectError:
-        _LOGGER.exception("Connection error for entry %s", entry.entry_id)
-    except httpx.TimeoutException:
-        _LOGGER.exception("Timeout error for entry %s", entry.entry_id)
-    except Exception:
-        _LOGGER.exception("Unexpected error during setup for entry %s", entry.entry_id)
-    else:
-        # Create WebSocket manager for real-time updates
-        websocket_manager = SabianaWebSocketManager(
-            hass,
-            lambda: coordinator.short_jwt.token,
-            refresh_token=coordinator.async_request_refresh,
-        )
-
-        # Try to connect to WebSocket (non-blocking, will reconnect if fails)
-        try:
-            connected = await websocket_manager.async_connect()
-            if connected:
-                _LOGGER.info("Connected to Sabiana WebSocket for real-time updates")
-            else:
-                _LOGGER.warning(
-                    "Could not connect to Sabiana WebSocket, "
-                    "will use REST API polling with automatic reconnection attempts"
-                )
-        except Exception:
-            _LOGGER.exception(
-                "Error connecting to WebSocket, will use REST API polling"
-            )
-
-        device_coordinator = SabianaDeviceCoordinator(
-            hass,
-            session,
-            coordinator,
-            [device.id for device in devices],
-            websocket_manager=websocket_manager,
-        )
-
-        await device_coordinator.async_config_entry_first_refresh()
-
-        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
-            "session": session,
-            "token_coordinator": coordinator,
-            "device_coordinator": device_coordinator,
-            "websocket_manager": websocket_manager,
-            "devices": devices,
-        }
-        _LOGGER.debug(
-            "Stored data for entry %s: %d devices",
-            entry.entry_id,
-            len(devices),
-        )
-
-        try:
-            await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-            _LOGGER.info(
-                "Successfully setup Sabiana HVAC integration for entry %s",
-                entry.entry_id,
-            )
-        except Exception:
-            _LOGGER.exception("Failed to setup platforms for entry %s", entry.entry_id)
+        connected = await websocket_manager.async_connect()
+        if connected:
+            _LOGGER.info("Connected to Sabiana WebSocket for real-time updates")
         else:
-            return True
+            _LOGGER.warning(
+                "Could not connect to Sabiana WebSocket: devices stay unavailable "
+                "until it reconnects (automatic attempts with backoff)"
+            )
+    except Exception:
+        _LOGGER.exception("Error connecting to WebSocket, devices stay unavailable")
 
-    return False
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
+        "session": session,
+        "token_coordinator": coordinator,
+        "device_coordinator": device_coordinator,
+        "websocket_manager": websocket_manager,
+        "devices": devices,
+    }
+    _LOGGER.debug(
+        "Stored data for entry %s: %d devices",
+        entry.entry_id,
+        len(devices),
+    )
+
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        _LOGGER.exception("Failed to setup platforms for entry %s", entry.entry_id)
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        await websocket_manager.async_disconnect()
+        await device_coordinator.async_shutdown()
+        return False
+
+    _LOGGER.info(
+        "Successfully setup Sabiana HVAC integration for entry %s",
+        entry.entry_id,
+    )
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -18,11 +19,10 @@ from .const import (
     CONF_LONG_JWT_EXPIRE_AT,
     CONF_SHORT_JWT,
     CONF_SHORT_JWT_EXPIRE_AT,
-    DEFAULT_POLL_INTERVAL,
     DOMAIN,
-    WS_CONNECTED_POLL_INTERVAL,
 )
-from .models import JWT, SabianaDeviceState
+from .models import JWT, SabianaDevice
+from .protocol import decode_device_data
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -30,9 +30,17 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
-    from .websocket import SabianaWebSocketManager, WebSocketDeviceUpdate
+    from .websocket import (
+        SabianaWebSocketManager,
+        WebSocketConnectionEvent,
+        WebSocketDeviceUpdate,
+        WebSocketStatusEvent,
+    )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Secrets never written to the logs
+_REDACTED_KEYS = frozenset({CONF_PASSWORD, CONF_SHORT_JWT, CONF_LONG_JWT})
 
 
 class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
@@ -133,7 +141,13 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
             self.short_jwt.expire_at.isoformat(),
             self.long_jwt.expire_at.isoformat(),
         )
-        _LOGGER.debug("Config entry data: %s", self.config_entry.data)
+        _LOGGER.debug(
+            "Config entry data: %s",
+            {
+                key: "**REDACTED**" if key in _REDACTED_KEYS else value
+                for key, value in self.config_entry.data.items()
+            },
+        )
         return self.short_jwt.token
 
     async def _async_reauth(self) -> tuple[JWT, JWT]:
@@ -196,6 +210,31 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
         self.data = short_jwt.token
 
+    def store_rotated_long_jwt(self, token: str) -> None:
+        """Store a long JWT rotated by the server in a response envelope.
+
+        The app saves any "token" returned with "status": 0 as its new long
+        JWT (checkResponse). A token whose expiry cannot be read is ignored,
+        keeping the current one.
+        """
+        if token == self.long_jwt.token:
+            return
+        try:
+            long_jwt = api.create_jwt(token)
+        except api.SabianaApiClientError:
+            _LOGGER.warning("Ignoring rotated long JWT without a readable expiry")
+            return
+
+        data = {
+            **self.config_entry.data,
+            CONF_LONG_JWT: long_jwt.token,
+            CONF_LONG_JWT_EXPIRE_AT: int(long_jwt.expire_at.timestamp()),
+        }
+        self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+        _LOGGER.info(
+            "Stored rotated long JWT, expires at %s", long_jwt.expire_at.isoformat()
+        )
+
     async def async_force_renew(self) -> str:
         """Force an unconditional token renewal, bypassing expiry checks.
 
@@ -235,11 +274,12 @@ class SabianaTokenCoordinator(DataUpdateCoordinator[str]):
         return new_short_jwt.token
 
 
-class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceState]]):
-    """Coordinator that manages Sabiana device states.
+class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDevice]]):
+    """Coordinator that owns the device list of the account.
 
-    Uses WebSocket for real-time updates when connected, with REST API
-    polling as a fallback when WebSocket is unavailable.
+    The data is the parsed getDeviceForUserV2 list, keyed by idDevice, as
+    the app keeps it: REST reads replace it and Socket.IO events update single
+    devices in place (data, connEvents, status). There is no polling.
     """
 
     def __init__(
@@ -247,7 +287,7 @@ class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceStat
         hass: HomeAssistant,
         session: httpx.AsyncClient,
         token_coordinator: SabianaTokenCoordinator,
-        device_ids: list[str],
+        config_entry: ConfigEntry,
         websocket_manager: SabianaWebSocketManager | None = None,
     ) -> None:
         """Initialize the device coordinator.
@@ -256,157 +296,185 @@ class SabianaDeviceCoordinator(DataUpdateCoordinator[dict[str, SabianaDeviceStat
             hass: Home Assistant instance.
             session: HTTP client session.
             token_coordinator: Token coordinator for JWT management.
-            device_ids: List of device IDs to track.
+            config_entry: Config entry the devices belong to.
             websocket_manager: Optional WebSocket manager for real-time updates.
 
         """
-        # Determine initial poll interval based on WebSocket state
-        ws_connected = websocket_manager is not None and websocket_manager.connected
-        initial_interval = (
-            WS_CONNECTED_POLL_INTERVAL if ws_connected else DEFAULT_POLL_INTERVAL
-        )
-
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_devices",
-            update_interval=timedelta(seconds=initial_interval),
+            # No periodic polling, as in the app: the list is read at setup,
+            # on every reconnection of the socket and on appMsg "refresh".
+            update_interval=None,
+            config_entry=config_entry,
+            # Records are frozen dataclasses: skip listener updates when a
+            # REST read returns exactly what we already have.
+            always_update=False,
         )
         self._session = session
         self._token_coordinator = token_coordinator
-        self._device_ids = device_ids
         self._websocket_manager = websocket_manager
-        self._unregister_ws_callback: Callable[[], None] | None = None
-        self._unregister_ws_status_callback: Callable[[], None] | None = None
-        self._unregister_ws_refresh_callback: Callable[[], None] | None = None
+        self._device_ids: frozenset[str] | None = None
+        self._unsubscribe_callbacks: list[Callable[[], None]] = []
+        self.last_fw: dict[str, str] = {}
         self.data = {}
 
         # Register for WebSocket updates if manager is available
         if self._websocket_manager is not None:
             self._setup_websocket_callbacks()
 
+    @property
+    def realtime_connected(self) -> bool:
+        """Return whether the Socket.IO channel is up (data events arrive)."""
+        return self._websocket_manager is not None and self._websocket_manager.connected
+
+    @property
+    def device_ids(self) -> frozenset[str]:
+        """Return the ids of the devices of the account."""
+        return self._device_ids or frozenset()
+
     def _setup_websocket_callbacks(self) -> None:
         """Set up callbacks for WebSocket events."""
         if self._websocket_manager is None:
             return
 
-        def on_device_update(update: WebSocketDeviceUpdate) -> None:
-            """Handle real-time device updates from WebSocket."""
-            if update.device_id not in self._device_ids:
-                return  # Not a device we're tracking
-
-            _LOGGER.debug(
-                "Received WebSocket update for device %s",
-                update.device_id,
-            )
-
-            # Update our data and notify listeners
-            self.data[update.device_id] = update.state
-            self.async_set_updated_data(self.data)
-
-        self._unregister_ws_callback = (
-            self._websocket_manager.register_device_update_callback(on_device_update)
+        ws = self._websocket_manager
+        self._unsubscribe_callbacks.extend(
+            [
+                ws.register_device_update_callback(self._handle_ws_data),
+                ws.register_connection_event_callback(self._handle_ws_conn_event),
+                ws.register_status_callback(self._handle_ws_status),
+                ws.register_refresh_callback(self._handle_ws_refresh),
+                ws.register_connection_status_callback(
+                    self._handle_ws_connection_status
+                ),
+            ]
         )
 
-        # Also register for refresh requests
-        def on_refresh_request() -> None:
-            """Handle refresh request from server."""
-            _LOGGER.debug("Server requested refresh, triggering immediate update")
-            self.hass.async_create_task(self.async_request_refresh())
+    def _set_device(self, device: SabianaDevice) -> None:
+        """Replace one device record and notify the entities."""
+        self.async_set_updated_data({**self.data, device.id: device})
 
-        self._unregister_ws_refresh_callback = (
-            self._websocket_manager.register_refresh_callback(on_refresh_request)
-        )
+    def _handle_ws_data(self, update: WebSocketDeviceUpdate) -> None:
+        """Apply a "data" event: new lastData, and the device is online.
 
-        # Register for connection status changes to adjust poll interval
-        def on_connection_status(*, connected: bool) -> None:
-            """Adjust poll interval based on WebSocket connection status."""
-            if connected:
-                new_interval = WS_CONNECTED_POLL_INTERVAL
-                _LOGGER.info(
-                    "WebSocket connected, increasing REST poll interval to %ds",
-                    new_interval,
-                )
-            else:
-                new_interval = DEFAULT_POLL_INTERVAL
-                _LOGGER.info(
-                    "WebSocket disconnected, reducing REST poll interval to %ds",
-                    new_interval,
-                )
-            self.update_interval = timedelta(seconds=new_interval)
-
-        self._unregister_ws_status_callback = (
-            self._websocket_manager.register_connection_status_callback(
-                on_connection_status
-            )
-        )
-
-    async def _async_update_data(self) -> dict[str, SabianaDeviceState]:
-        """Fetch device states from the API.
-
-        This is called periodically as a fallback when WebSocket updates
-        may have been missed, or when WebSocket is not connected.
+        App: cloudDevicesDataUpdates. A frame forces connectionUp to true;
+        an unchanged frame on an online device changes nothing.
         """
-        if not self._device_ids:
-            _LOGGER.debug("No Sabiana devices registered for polling")
-            return {}
+        device = self.data.get(update.device_id)
+        if device is None:
+            _LOGGER.debug("Data event for unknown device %s", update.device_id)
+            return
+        if update.data == device.last_data and device.connection_up:
+            return
 
-        # Check if WebSocket is connected - if so, we can poll less frequently
-        ws_connected = (
-            self._websocket_manager is not None and self._websocket_manager.connected
+        state, data_valid = decode_device_data(
+            device.model_type, update.data, previous=device.state
+        )
+        if not data_valid:
+            _LOGGER.warning("Device %s sent invalid data: %s", device.id, update.data)
+        if not device.connection_up:
+            _LOGGER.debug("Data from device %s, forcing it online", device.id)
+
+        self._set_device(
+            replace(
+                device,
+                last_data=update.data,
+                state=state,
+                data_valid=data_valid,
+                connection_up=True,
+            )
         )
 
-        if ws_connected:
-            _LOGGER.debug("WebSocket connected, REST poll as backup verification")
+    def _handle_ws_conn_event(self, event: WebSocketConnectionEvent) -> None:
+        """Apply a "connEvents" event (app: cloudDevicesConnEventUpdates)."""
+        device = self.data.get(event.device_id)
+        if device is None or device.connection_up == event.connected:
+            return
+        self._set_device(replace(device, connection_up=event.connected))
 
+    def _handle_ws_status(self, event: WebSocketStatusEvent) -> None:
+        """Apply a "status" event (app: cloudDevicesStateUpdates)."""
+        device = self.data.get(event.device_id)
+        if device is None:
+            return
+        updated = replace(device, wifi_fw=event.wifi_fw, wifi_rssi=event.wifi_rssi)
+        if updated != device:
+            self._set_device(updated)
+
+    def _handle_ws_refresh(self) -> None:
+        """Re-read the device list when the server asks for it."""
+        _LOGGER.debug("Server requested refresh, triggering immediate update")
+        self.hass.async_create_task(self.async_request_refresh())
+
+    def _handle_ws_connection_status(self, *, connected: bool) -> None:
+        """Notify the entities: without the socket the cloud is offline.
+
+        App: isCloudOnLine follows the socket and blocks every control while
+        it is down; no REST fallback is used.
+        """
+        _LOGGER.info(
+            "Sabiana cloud %s",
+            "online" if connected else "offline until the WebSocket reconnects",
+        )
+        self.async_update_listeners()
+
+    async def _async_update_data(self) -> dict[str, SabianaDevice]:
+        """Read the device list (GET devices/getDeviceForUserV2).
+
+        Called only when the app reads it: at setup, after every reconnection
+        of the socket and when the server sends appMsg "refresh".
+        """
         await self._token_coordinator.async_request_refresh()
-        short_jwt = self._token_coordinator.data
 
         try:
-            # Get devices which includes lastData with current state
-            response = await self._session.get(
-                f"{api.BASE_URL}/devices/getDeviceForUserV2",
-                headers=api.create_headers(short_jwt),
+            device_list = await api.async_get_devices(
+                self._session, self._token_coordinator.short_jwt.token
             )
-            data = api.validate_response(response)
-            states = api.extract_device_states_from_devices(data)
-
-            _LOGGER.debug("Polled status for %d devices", len(states))
         except api.SabianaApiAuthError as err:
-            msg = f"Authentication error while polling devices: {err}"
+            msg = f"Authentication error while reading devices: {err}"
             raise UpdateFailed(msg) from err
         except api.SabianaApiClientError as err:
-            msg = f"API error while polling devices: {err}"
+            msg = f"API error while reading devices: {err}"
             raise UpdateFailed(msg) from err
         except httpx.RequestError as err:
-            msg = f"Connection error while polling devices: {err}"
+            msg = f"Connection error while reading devices: {err}"
             raise UpdateFailed(msg) from err
 
-        # Filter to only return states for our tracked devices
-        filtered_states = {
-            device_id: state
-            for device_id, state in states.items()
-            if device_id in self._device_ids
-        }
+        if device_list.rotated_token:
+            self._token_coordinator.store_rotated_long_jwt(device_list.rotated_token)
 
-        missing = set(self._device_ids) - set(filtered_states)
-        if missing:
-            _LOGGER.debug("Did not receive state for devices: %s", missing)
+        self.last_fw = device_list.last_fw
+        self._check_device_list_changed(device_list.devices)
+        _LOGGER.debug("Read %d devices", len(device_list.devices))
+        return device_list.devices
 
-        return filtered_states
+    def _check_device_list_changed(self, devices: dict[str, SabianaDevice]) -> None:
+        """Reload the entry when devices are added to or removed from the account.
+
+        The app rebuilds its list (and refreshes the socket subscription) when
+        the set of idDevice changes; here entities are created at setup, so a
+        reload is needed to follow the change.
+        """
+        device_ids = frozenset(devices)
+        if self._device_ids is None or device_ids == self._device_ids:
+            self._device_ids = device_ids
+            return
+
+        _LOGGER.info(
+            "Device list changed (added: %s, removed: %s), reloading the integration",
+            sorted(device_ids - self._device_ids),
+            sorted(self._device_ids - device_ids),
+        )
+        self._device_ids = device_ids
+        if self.config_entry is not None:
+            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
 
     async def async_shutdown(self) -> None:
         """Clean up when the coordinator is being shut down."""
-        if self._unregister_ws_callback is not None:
-            self._unregister_ws_callback()
-            self._unregister_ws_callback = None
-
-        if self._unregister_ws_status_callback is not None:
-            self._unregister_ws_status_callback()
-            self._unregister_ws_status_callback = None
-
-        if self._unregister_ws_refresh_callback is not None:
-            self._unregister_ws_refresh_callback()
-            self._unregister_ws_refresh_callback = None
+        for unsubscribe in self._unsubscribe_callbacks:
+            unsubscribe()
+        self._unsubscribe_callbacks.clear()
 
         await super().async_shutdown()

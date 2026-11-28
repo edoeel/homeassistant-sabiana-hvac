@@ -6,16 +6,6 @@ This module contains all the constants used throughout the integration,
 including API endpoints, configuration keys, and mapping dictionaries.
 """
 
-from homeassistant.components.climate import (
-    HVACMode,
-)
-from homeassistant.components.climate.const import (
-    FAN_AUTO,
-    FAN_HIGH,
-    FAN_LOW,
-    FAN_MEDIUM,
-)
-
 DOMAIN = "sabiana_hvac"
 
 BASE_URL = "https://be-standard.sabianawm.cloud"
@@ -25,10 +15,14 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/93.0.4577.82 Mobile Safari/537.36"
 )
 
-DEFAULT_POLL_INTERVAL = 120  # Fallback when WebSocket is disconnected
-WS_CONNECTED_POLL_INTERVAL = 1800  # 30 minutes when WebSocket handles real-time
+# Reconnection of the Socket.IO channel. The app retries every 1-5 s; here the
+# delay grows to one minute so the Sabiana backend is never flooded.
 WEBSOCKET_RECONNECT_DELAY = 5  # Initial seconds to wait before reconnecting
-WEBSOCKET_MAX_RECONNECT_DELAY = 300  # Max 5 minutes between reconnect attempts
+WEBSOCKET_MAX_RECONNECT_DELAY = 60  # Max seconds between reconnect attempts
+WEBSOCKET_RECONNECT_JITTER = 0.5  # Delay randomized by +/-50%, as in the app
+# The delay goes back to the initial value only after a connection lasted this
+# long, so a server that accepts and drops at once is not hammered.
+WEBSOCKET_STABLE_CONNECTION = 60
 
 ERROR_INVALID_AUTH = "invalid_auth"
 ERROR_CANNOT_CONNECT = "cannot_connect"
@@ -41,51 +35,18 @@ CONF_SHORT_JWT_EXPIRE_AT = "short_jwt_expire_at"
 CONF_LONG_JWT = "long_jwt"
 CONF_LONG_JWT_EXPIRE_AT = "long_jwt_expire_at"
 
-HVAC_MODE_MAP = {
-    HVACMode.COOL: "0",  # MODE_SUMMER
-    HVACMode.HEAT: "1",  # MODE_WINTER
-    HVACMode.AUTO: "2",  # MODE_AUTO
-    HVACMode.FAN_ONLY: "3",  # MODE_FAN_ONLY
-    HVACMode.OFF: "4",
-}
-# Byte value → HA mode string (used by decode_last_data in api.py)
-HVAC_MODE_DECODE: dict[int, str] = {
-    0x00: "cool",  # MODE_SUMMER
-    0x01: "heat",  # MODE_WINTER
-    0x02: "auto",  # MODE_AUTO
-    0x03: "fan_only",  # MODE_FAN_ONLY
-}
-FAN_MODE_MAP = {
-    FAN_LOW: "1",  # Command "1" -> State byte 7 upper nibble 0x0
-    FAN_MEDIUM: "2",  # Command "2" -> State byte 7 upper nibble 0x1
-    FAN_HIGH: "3",  # Command "3" -> State byte 7 upper nibble 0x3
-    FAN_AUTO: "4",  # Command "4" -> State byte 7 upper nibble 0x2
-}
-SWING_MODE_MAP = {
-    "Vertical": "3",
-    "Horizontal": "1",
-    "45 Degrees": "2",
-    "Swing": "4",
-}
-
-# Mapping from device flap position byte value to swing mode name.
-# The device reports flap position as an integer (0-4) at byte 8,
-# with a presence flag at byte 9.
-# Position 0 ("Standard") has no matching swing mode — treated as no change.
+# Swing modes of the climate entity, by flap position (word 5, high byte).
+# App labels: 0 "Stop swing", 1 "Summer", 2 "Winter", 3 "Full open", 4 "Swing";
+# positions 1-3 keep the names used since the first release of the integration.
 FLAP_POSITION_TO_SWING_MODE: dict[int, str] = {
+    0: "Stop swing",
     1: "Horizontal",  # Summer position
     2: "45 Degrees",  # Winter position
-    3: "Vertical",  # All open
+    3: "Vertical",  # Full open
     4: "Swing",  # Oscillating
 }
-
-# Raw HVAC mode byte values to setpoint byte positions.
-# Each mode stores its target temperature in a different Modbus register:
-#   Summer/Cool (0) → word 7 = bytes 12-13
-#   Winter/Heat (1) → word 8 = bytes 14-15
-#   Auto        (2) → word 9 = bytes 16-17
-MODE_SETPOINT_BYTES: dict[int, tuple[int, int]] = {
-    0: (12, 13),  # Summer / Cool
-    1: (14, 15),  # Winter / Heat
-    2: (16, 17),  # Auto
+SWING_MODE_TO_FLAP_POSITION = {
+    name: position for position, name in FLAP_POSITION_TO_SWING_MODE.items()
 }
+# TMB units only have "Stop swing" and "Swing" (flapSimpleMode)
+FLAP_SIMPLE_POSITIONS = (0, 4)

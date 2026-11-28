@@ -9,21 +9,15 @@ including authentication, device management, and command sending.
 import base64
 import json
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.httpx_client import create_async_httpx_client
 from httpx_retries import Retry, RetryTransport
 
-from .const import (
-    BASE_URL,
-    FLAP_POSITION_TO_SWING_MODE,
-    HVAC_MODE_DECODE,
-    MODE_SETPOINT_BYTES,
-    USER_AGENT,
-)
-from .models import JWT, SabianaDeviceState
+from .const import BASE_URL, USER_AGENT
+from .models import JWT, SabianaDevice, SabianaDeviceList
+from .protocol import COMMAND_START, decode_device_data
 
 if TYPE_CHECKING:
     import httpx
@@ -44,18 +38,11 @@ class SabianaApiAuthError(SabianaApiClientError):
     """Exception raised for authentication errors."""
 
 
-@dataclass(frozen=True)
-class SabianaDevice:
-    """Represents a Sabiana HVAC device.
+# Re-exported: SabianaDevice used to live here.
+__all__ = ["SabianaDevice", "SabianaDeviceList"]
 
-    Attributes:
-        id: Unique device identifier.
-        name: Human-readable device name.
-
-    """
-
-    id: str
-    name: str
+# A rotated long JWT is accepted only if longer than this (app: checkResponse).
+_MIN_ROTATED_TOKEN_LENGTH = 10
 
 
 def create_headers(short_jwt: str | None = None) -> dict[str, str]:
@@ -261,6 +248,16 @@ def _create_jwt(token: str) -> JWT:
     return JWT(token=token, expire_at=expire_at)
 
 
+def create_jwt(token: str) -> JWT:
+    """Create a JWT object from a token string, reading its 'exp' claim.
+
+    Raises:
+        SabianaApiClientError: If token is malformed or missing 'exp' claim.
+
+    """
+    return _create_jwt(token)
+
+
 def extract_jwts(data: dict[str, Any]) -> tuple[JWT, JWT]:
     """Extract shortJwt and longJwt from API response.
 
@@ -292,307 +289,130 @@ def extract_renewed_token(data: dict[str, Any]) -> JWT:
     return _create_jwt(data["body"]["newToken"])
 
 
-def extract_devices(data: dict[str, Any]) -> list[SabianaDevice]:
-    """Extract device list from API response.
+def extract_rotated_token(data: dict[str, Any]) -> str | None:
+    """Return the new long JWT carried by a successful response, if any.
 
-    Args:
-        data: API response data dictionary.
-
-    Returns:
-        List of SabianaDevice objects.
-
+    The app stores any "token" longer than 10 characters found next to
+    "status": 0 as its new long JWT (checkResponse).
     """
-    devices_data = data.get("body", {}).get("devices", [])
-    return [
-        SabianaDevice(
-            id=d["idDevice"],
-            name=d.get("deviceName") or d["idDevice"],
-        )
-        for d in devices_data
-    ]
-
-
-def decode_last_data(hex_string: str) -> SabianaDeviceState:
-    """Decode the lastData hex string into a SabianaDeviceState.
-
-    Byte layout (from official Sabiana app, Modbus register mapping):
-        Word 1 (bytes 0-1):   Controller model / device type
-        Word 3 (bytes 4-5):   Fan mode (high byte=4) + HVAC mode (low byte=5)
-        Word 4 (bytes 6-7):   Power state (byte 7, lower nibble) / Sleep (byte 7, bit 7)
-        Word 5 (bytes 8-9):   Flap position (byte 8) + flap present flag (byte 9)
-        Word 6 (bytes 10-11): Current temperature x 10  (16-bit big-endian)
-        Word 7 (bytes 12-13): Summer setpoint x 10      (16-bit big-endian)
-        Word 8 (bytes 14-15): Winter setpoint x 10      (16-bit big-endian)
-        Word 9 (bytes 16-17): Auto setpoint x 10        (16-bit big-endian)
-
-    Returns:
-        SabianaDeviceState with decoded values or None values if decoding fails.
-
-    """
-    # Minimum data length: 18 bytes to cover all setpoints (word 9, bytes 16-17)
-    min_data_length = 18
-
-    # Byte indices
-    byte_fan_mode = 4
-    byte_hvac_mode = 5
-    byte_power_sleep = 7
-    byte_flap_position = 8
-    byte_flap_present = 9
-    byte_current_temp_high = 10
-    byte_current_temp_low = 11
-    byte_auto_mode_flag = 7  # bit 2 of byte 7 = autoModeAvailable
-
-    try:
-        data = bytes.fromhex(hex_string)
-
-        # Validate minimum data length
-        if len(data) < min_data_length:
-            _LOGGER.warning(
-                "lastData too short: %d bytes (minimum %d required)",
-                len(data),
-                min_data_length,
-            )
-            return _create_empty_device_state(hex_string)
-
-        # Decode controller model (bytes 1-2)
-        controller_model = _decode_controller_model(data)
-
-        # Decode HVAC mode and power state (need mode before target temp)
-        hvac_mode, power_on = _decode_hvac_mode_and_power(
-            data[byte_hvac_mode], data[byte_power_sleep]
-        )
-
-        # Decode current temperature (word 6, bytes 10-11, 16-bit big-endian)
-        current_temp = _decode_current_temperature(
-            data[byte_current_temp_high], data[byte_current_temp_low]
-        )
-
-        # Decode target temperature (mode-aware setpoint selection)
-        raw_mode = data[byte_hvac_mode] & 0x0F
-        sp_high, sp_low = MODE_SETPOINT_BYTES.get(raw_mode, (14, 15))
-        if sp_high < len(data) and sp_low < len(data):
-            target_temp = _decode_target_temperature(data[sp_high], data[sp_low])
-        else:
-            # Fallback to winter setpoint if data too short for the mode's register
-            target_temp = _decode_target_temperature(data[14], data[15])
-
-        # Decode fan mode (byte 4)
-        fan_mode = _decode_fan_mode(data[byte_fan_mode])
-
-        # Decode sleep/preset mode from status flags
-        preset_mode = _decode_preset_mode(data[byte_power_sleep])
-
-        # Decode swing/flap mode (word 5: byte 8 = position, byte 9 = present flag)
-        swing_mode = _decode_swing_mode(
-            data[byte_flap_position], data[byte_flap_present]
-        )
-
-        # Decode auto mode availability (bit 2 of byte 7)
-        # Matches app: autoModeAvaliable = n[2] from getBitToBitOK
-        auto_mode_available = bool(data[byte_auto_mode_flag] & 0x04)
-
-        # Diagnostic logging: dump all bytes relevant to decoding
-        _LOGGER.debug(
-            "Device %s decode: mode=%s (raw=%d), target=%.1f (sp_bytes=%d-%d), "
-            "current=%.1f, swing=%s, bytes[8-17]=[%s], full_hex=%s",
-            controller_model,
-            hvac_mode,
-            raw_mode,
-            target_temp if target_temp is not None else 0.0,
-            sp_high,
-            sp_low,
-            current_temp if current_temp is not None else 0.0,
-            swing_mode,
-            " ".join(f"0x{data[i]:02X}" for i in range(8, min(18, len(data)))),
-            hex_string,
-        )
-
-        return SabianaDeviceState(
-            hvac_mode=hvac_mode,
-            target_temperature=target_temp,
-            current_temperature=current_temp,
-            fan_mode=fan_mode,
-            swing_mode=swing_mode,
-            preset_mode=preset_mode,
-            power_on=power_on,
-            controller_model=controller_model,
-            auto_mode_available=auto_mode_available,
-            raw_state={"lastData": hex_string, "decoded_bytes": list(data)},
-        )
-
-    except ValueError, IndexError:
-        _LOGGER.exception("Failed to decode lastData")
-        return _create_empty_device_state(hex_string, error="decode_error")
-
-
-def _create_empty_device_state(
-    hex_string: str, error: str | None = None
-) -> SabianaDeviceState:
-    """Create a SabianaDeviceState with all None values."""
-    raw_state = {"lastData": hex_string}
-    if error:
-        raw_state["error"] = error
-
-    return SabianaDeviceState(
-        hvac_mode=None,
-        target_temperature=None,
-        current_temperature=None,
-        fan_mode=None,
-        swing_mode=None,
-        preset_mode=None,
-        power_on=None,
-        controller_model=None,
-        auto_mode_available=False,
-        raw_state=raw_state,
-    )
-
-
-def _decode_controller_model(data: bytes) -> str:
-    """Decode controller model from bytes 1-2."""
-    min_bytes_for_model = 2
-    if len(data) > min_bytes_for_model:
-        return f"{data[1]:02X}{data[2]:02X}"
-    return "UNKNOWN"
-
-
-def _decode_current_temperature(high_byte: int, low_byte: int) -> float | None:
-    """Decode current temperature from word 6 (bytes 10-11, 16-bit big-endian)."""
-    raw_value = (high_byte << 8) | low_byte
-    return raw_value / 10.0 if raw_value > 0 else None
-
-
-def _decode_target_temperature(high_byte: int, low_byte: int) -> float | None:
-    """Decode target temperature from a setpoint word (16-bit big-endian)."""
-    if high_byte or low_byte:
-        return ((high_byte << 8) | low_byte) / 10.0
+    token = data.get("token")
+    if (
+        data.get("status", 0) == 0
+        and isinstance(token, str)
+        and len(token) > _MIN_ROTATED_TOKEN_LENGTH
+    ):
+        return token
     return None
 
 
-def _decode_hvac_mode_and_power(mode_byte: int, power_byte: int) -> tuple[str, bool]:
-    """Decode HVAC mode and power state from byte 5 and byte 7."""
-    mode_nibble = mode_byte & 0x0F
-    hvac_mode = HVAC_MODE_DECODE.get(mode_nibble, "heat")
-
-    # Check power state (byte 7 bit 0 = 1 means ON)
-    power_on = bool(power_byte & 0x01)
-    if not power_on:
-        hvac_mode = "off"
-
-    return hvac_mode, power_on
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
-def _decode_fan_mode(fan_byte: int) -> str:
-    """Decode fan mode from byte 4.
+def _optional_int(value: object) -> int | None:
+    """Convert a JSON number (or numeric string) to int, like Number() in JS."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+    return None
 
-    Verified mappings from actual device testing:
-    - 0x04: AUTO
-    - 0x14: LOW
-    - 0x3C: MEDIUM
-    - 0x6E: HIGH
 
-    Some controller models use different byte values. We use both exact
-    matching and range-based fallback to handle unknown devices gracefully.
+def parse_device(raw: dict[str, Any]) -> SabianaDevice:
+    """Build a SabianaDevice from one entry of getDeviceForUserV2 body.devices.
 
-    Args:
-        fan_byte: Byte 4 value.
-
-    Returns:
-        Fan mode string (low, medium, high, auto).
-
+    lastData is decoded with the decoder chosen by deviceStateModelType, as
+    the app does in manageDevicesList / createCorrectUnitDataModel.
     """
-    # Exact mappings (verified from device testing across multiple models)
-    fan_mode_map = {
-        0x00: "auto",
-        0x01: "low",  # Reported by some controller models
-        0x02: "medium",  # Reported by some controller models
-        0x03: "high",  # Reported by some controller models
-        0x04: "auto",
-        0x14: "low",
-        0x1C: "low",  # Alternate encoding
-        0x3C: "medium",
-        0x4C: "medium",  # Alternate encoding
-        0x6E: "high",
-        0x7E: "high",  # Alternate encoding
-    }
+    device_id = str(raw["idDevice"])
+    model_type = _optional_str(raw.get("deviceStateModelType")) or ""
+    last_data = _optional_str(raw.get("lastData"))
 
-    fan_mode = fan_mode_map.get(fan_byte)
+    # RVU frames have a different layout and are not decoded yet.
+    state, data_valid = decode_device_data(model_type, last_data)
 
-    if fan_mode is not None:
-        return fan_mode
-
-    # Range-based fallback for unknown byte values
-    # This prevents silent defaulting to "auto" which causes UI revert bugs
-    _LOGGER.warning(
-        "Unknown fan mode byte: 0x%02X. Please report this value to the "
-        "integration developers. Using range-based fallback.",
-        fan_byte,
+    connection_up = raw.get("connectionUp")
+    return SabianaDevice(
+        id=device_id,
+        name=_optional_str(raw.get("deviceName")) or device_id,
+        model_type=model_type,
+        group_id=_optional_str(raw.get("deviceGroupId")),
+        group_name=_optional_str(raw.get("deviceGroupName")),
+        group_shared=bool(raw.get("deviceGroupShared")),
+        from_share=bool(raw.get("fromShare")),
+        from_group_share=bool(raw.get("fromGroupShare")),
+        connection_up=None if connection_up is None else bool(connection_up),
+        wifi_fw=_optional_str(raw.get("deviceStateFw")),
+        wifi_rssi=_optional_int(raw.get("deviceWiFiRSSI")),
+        fw_update_request=_optional_str(raw.get("fwUpdateRequest")),
+        time_zone=_optional_str(raw.get("deviceTimeZone")),
+        last_data=last_data,
+        data_valid=data_valid,
+        state=state,
     )
 
-    # Fan byte range thresholds for fallback classification
-    fan_auto_threshold = 0x08
-    fan_low_threshold = 0x28
-    fan_medium_threshold = 0x50
 
-    if fan_byte <= fan_auto_threshold:
-        return "auto"
-    if fan_byte <= fan_low_threshold:
-        return "low"
-    if fan_byte <= fan_medium_threshold:
-        return "medium"
-    return "high"
+def parse_device_list(data: dict[str, Any]) -> SabianaDeviceList:
+    """Parse a validated getDeviceForUserV2 response.
 
+    Body: {"devices": [...], "lastFw": [{"type": "evo", "version": "1.23"}]}.
+    Devices are sorted by idDevice, like the app.
 
-def _decode_preset_mode(power_sleep_byte: int) -> str:
-    """Decode preset/sleep mode from byte 7 status flags."""
-    if power_sleep_byte & 0x80:
-        return "sleep"
-
-    return "none"
-
-
-def _decode_swing_mode(flap_position: int, flap_present: int) -> str | None:
-    """Decode swing/flap mode from word 5 (byte 8 = position, byte 9 = present flag)."""
-    if flap_present != 1:
-        return None
-
-    return FLAP_POSITION_TO_SWING_MODE.get(flap_position)
-
-
-def extract_device_states_from_devices(
-    data: dict[str, Any],
-) -> dict[str, SabianaDeviceState]:
-    """Extract device states from getDeviceForUserV2 response by decoding lastData."""
-    devices = data.get("body", {}).get("devices", [])
-    states = {}
-
-    for device in devices:
-        device_id = str(device.get("idDevice", ""))
-        device_name = str(device.get("deviceName", ""))
-        last_data = device.get("lastData", "")
-
-        if device_id and last_data:
-            states[device_id] = decode_last_data(last_data)
-            _LOGGER.debug(
-                "Decoded state for device id %s and name %s: %s",
-                device_id,
-                device_name,
-                states[device_id],
-            )
-
-    return states
-
-
-def extract_result(data: dict[str, Any]) -> bool:
-    """Extract result status from API response.
-
-    Args:
-        data: API response data dictionary.
-
-    Returns:
-        True if operation was successful, False otherwise.
+    Raises:
+        SabianaApiClientError: If the body does not have the shape the app
+            relies on (manageDevicesList fails on it and keeps the previous
+            list). An empty device list is valid.
 
     """
-    return data.get("body", {}).get("result", False)
+    body = data.get("body")
+    raw_devices = body.get("devices") if isinstance(body, dict) else None
+    raw_last_fw = body.get("lastFw") if isinstance(body, dict) else None
+    if (
+        not isinstance(raw_devices, list)
+        or not isinstance(raw_last_fw, list)
+        or not all(
+            isinstance(d, dict) and isinstance(d.get("idDevice"), str) and d["idDevice"]
+            for d in raw_devices
+        )
+        or not all(isinstance(item, dict) for item in raw_last_fw)
+    ):
+        msg = f"Malformed getDeviceForUserV2 response: {body!r}"
+        raise SabianaApiClientError(msg)
+
+    devices: dict[str, SabianaDevice] = {}
+    for raw in sorted(raw_devices, key=lambda d: d["idDevice"]):
+        device = parse_device(raw)
+        devices[device.id] = device
+        _LOGGER.debug(
+            "Device %s (%s): type=%s, connectionUp=%s, valid=%s, lastData=%s, state=%s",
+            device.id,
+            device.name,
+            device.model_type,
+            device.connection_up,
+            device.data_valid,
+            device.last_data,
+            device.state,
+        )
+
+    # App: lastFirmwareVersion[type] = version, for every entry
+    last_fw = {
+        item["type"]: item["version"]
+        for item in raw_last_fw
+        if isinstance(item.get("type"), str) and isinstance(item.get("version"), str)
+    }
+
+    return SabianaDeviceList(
+        devices=devices,
+        last_fw=last_fw,
+        rotated_token=extract_rotated_token(data),
+    )
 
 
 def create_session_client(hass: HomeAssistant) -> httpx.AsyncClient:
@@ -649,15 +469,15 @@ async def async_authenticate(
 async def async_get_devices(
     session: httpx.AsyncClient,
     short_jwt: str,
-) -> list[SabianaDevice]:
-    """Fetch user devices from Sabiana API.
+) -> SabianaDeviceList:
+    """Fetch the devices of the account (GET devices/getDeviceForUserV2).
 
     Args:
         session: HTTP client session.
         short_jwt: Short-term JWT.
 
     Returns:
-        List of SabianaDevice objects.
+        The parsed device list, with lastFw and the rotated long JWT, if any.
 
     Raises:
         SabianaApiAuthError: If authentication fails.
@@ -670,9 +490,9 @@ async def async_get_devices(
     _LOGGER.debug("Fetching devices from Sabiana API")
     response = await session.get(url, headers=headers)
     data = validate_response(response)
-    devices = extract_devices(data)
-    _LOGGER.debug("Retrieved %d devices from Sabiana API", len(devices))
-    return devices
+    device_list = parse_device_list(data)
+    _LOGGER.debug("Retrieved %d devices from Sabiana API", len(device_list.devices))
+    return device_list
 
 
 async def async_renew_jwt(session: httpx.AsyncClient, long_jwt: str) -> JWT:
@@ -706,17 +526,20 @@ async def async_send_command(
     short_jwt: str,
     device_id: str,
     data: str,
-) -> bool:
-    """Send command to Sabiana device.
+) -> dict[str, Any]:
+    """Send a fancoil command (POST devices/cmd, start 2304).
+
+    "status": 0 only means the cloud accepted the command, not that the
+    device applied it: the app waits for the next "data" event to know.
 
     Args:
         session: HTTP client session.
         short_jwt: Short-term JWT.
-        device_id: Target device identifier.
-        data: Command data string.
+        device_id: Target device identifier (idDevice).
+        data: The 5 registers, as built by FancoilCommand.to_hex.
 
     Returns:
-        True if command was successful, False otherwise.
+        The validated response, which may carry a rotated long JWT.
 
     Raises:
         SabianaApiAuthError: If authentication fails.
@@ -725,11 +548,15 @@ async def async_send_command(
     """
     url = f"{BASE_URL}/devices/cmd"
     headers = create_headers(short_jwt)
-    payload = {"deviceID": device_id, "start": 2304, "data": data, "restart": False}
+    payload = {
+        "deviceID": device_id,
+        "start": COMMAND_START,
+        "data": data,
+        "restart": False,
+    }
 
     _LOGGER.debug("Sending command to device %s: %s", device_id, data)
     response = await session.post(url, headers=headers, json=payload)
     response_data = validate_response(response)
-    result = extract_result(response_data)
-    _LOGGER.debug("Command result for device %s: %s", device_id, result)
-    return result
+    _LOGGER.debug("Command accepted by the cloud for device %s", device_id)
+    return response_data

@@ -23,7 +23,7 @@ Home Assistant custom integration designed to interface with Sabiana HVAC system
 
 ## ✨ Features
 
-*   **🌡️ Advanced Climate Control:** Gain granular control over Sabiana HVAC units, including setting HVAC modes (e.g., Cool, Heat, Fan Only, Off), target temperatures, fan speeds (Low, Medium, High, Auto), and swing modes.
+*   **🌡️ Advanced Climate Control:** Gain granular control over Sabiana HVAC units, including setting HVAC modes (e.g., Cool, Heat, Fan Only, Off), target temperatures, fan speeds on the unit's own scale (Low, Medium, High, Auto on stepped models; Auto and levels 1–10 on continuous models such as the Whisper), flap positions and the night mode where the model has them.
 *   **🔐 Secure API Authentication:** Utilizes secure, JWT-based authentication with the official Sabiana cloud API. User credentials (email and password) are securely stored exclusively on your local Home Assistant instance and are used solely for direct authentication with Sabiana servers.
 *   **🖥️ Native Home Assistant UI Integration:** Devices are exposed as standard Home Assistant climate entities, enabling full control and monitoring through the native user interface, automations, and scripts.
 
@@ -77,6 +77,7 @@ Home Assistant custom integration designed to interface with Sabiana HVAC system
 ## 🚧 Limitations
 
 *   **Supported Devices**: Currently, this integration has been tested and confirmed to work exclusively with **Sabiana Carisma Fly** models. Support for other models may be added in future updates.
+*   **"Stop swing" can freeze the flap (unit firmware, not Home Assistant)**: choosing **Stop swing** while the flap is in **Swing** freezes it wherever it is. When you turn the unit off, the flap does not close. At the next power-on it closes and stays closed, and the unit does not blow air until you choose another position. The official Sabiana app behaves the same, and neither the app nor Home Assistant can detect this state: the unit reports the same data either way. To stop the swing, choose a fixed position instead (Horizontal, 45 Degrees or Vertical; "Estate", "Inverno" and "Tutto aperto" in the app). If the flap is already frozen, choose Swing or a fixed position and then turn the unit off: the flap closes.
 *   **Version Status**: This integration is currently in **Beta** phase. While functional, users may encounter bugs or unexpected behavior. Caution is advised for use in production environments, and bug reports are highly encouraged.
 
 ## 📐 Architecture

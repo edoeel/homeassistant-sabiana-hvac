@@ -90,6 +90,7 @@ def sample_devices_response() -> dict:
                 {"idDevice": "device1", "deviceName": "Device 1"},
                 {"idDevice": "device2", "deviceName": "Device 2"},
             ],
+            "lastFw": [{"type": "evo", "version": "1.23"}],
         },
     }
 

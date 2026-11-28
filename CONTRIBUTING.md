@@ -50,6 +50,56 @@ This custom component is based on the [integration_blueprint template](https://g
    - This command will start the Home Assistant development environment
    - Wait for Home Assistant to fully initialize
 
+### Local Setup without Dev Containers
+
+You can also run everything directly on your machine (Linux, macOS, WSL2).
+
+1. **Install a recent Python**
+
+   The pinned Home Assistant version (see `requirements.txt`) requires **Python 3.14.2 or newer**. Older interpreters fail with `No matching distribution found for homeassistant==...`.
+   The easiest way is [`uv`](https://docs.astral.sh/uv/), which downloads the right interpreter for you without touching the system Python.
+
+2. **Create the virtual environment and install dependencies**
+
+   With `uv`:
+   ```bash
+   uv venv --python 3.14 .venv
+   source .venv/bin/activate
+   uv pip install -r requirements.txt
+   ```
+
+   Without `uv` (requires Python 3.14.2+ already installed):
+   ```bash
+   python3.14 -m venv .venv
+   source .venv/bin/activate
+   scripts/setup
+   ```
+
+   `.venv` is git-ignored. Check that `python --version` reports 3.14.x and that `which hass` points to `.venv/bin/hass`. If you recreate the environment, run `deactivate && hash -r` and activate it again.
+
+3. **Start Home Assistant**
+   ```bash
+   scripts/develop
+   ```
+   `scripts/develop` adds `custom_components/` to `PYTHONPATH` and starts `hass` with the `config/` directory in debug mode. The `hass` command must be on your `PATH`, so keep the virtual environment activated.
+   Home Assistant is then available at `http://localhost:8123` (under WSL2 the port is forwarded to Windows automatically).
+
+   Restart `scripts/develop` after changing Python code.
+
+### Running the Tests
+
+The tests need neither a running Home Assistant nor a real device: HTTP calls are mocked with `pytest-httpx` and Socket.IO frames are simulated in `tests/frames.py`.
+
+```bash
+source .venv/bin/activate
+pytest tests/ -v
+scripts/lint    # ruff format + ruff check --fix
+```
+
+### Debug Logging
+
+Debug logging for the integration is already enabled in `config/configuration.yaml` (`custom_components.sabiana_hvac: debug`). Logs are written to `config/home-assistant.log`. Testing against a real unit requires Sabiana account credentials and a device reachable through the Sabiana cloud.
+
 ### Verify the Setup
 
 1. **Check Home Assistant is running**
